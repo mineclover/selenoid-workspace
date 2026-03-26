@@ -1,0 +1,9 @@
+[submodule "packages/selenoid"]
+	path = packages/selenoid
+	url = https://github.com/mineclover/selenoid.git
+[submodule "packages/images"]
+	path = packages/images
+	url = https://github.com/mineclover/images.git
+[submodule "packages/bridge"]
+	path = packages/bridge
+	url = https://github.com/mineclover/selenoid-bridge.git
