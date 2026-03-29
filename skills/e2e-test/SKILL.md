@@ -9,13 +9,13 @@ Cross-browser E2E testing workflow using Selenoid (container management), browse
 
 ## Configuration
 
-Set these environment variables to customize paths. Defaults assume sibling directories.
+Set these environment variables to customize paths. Defaults assume the `selenoid-workspace` layout.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `SELENOID_DIR` | `../selenoid` (relative to bridge) | Selenoid source directory |
-| `SELENOID_IMAGES_DIR` | `../selenoid-images` (relative to bridge) | Images builder directory |
-| `SELENOID_BRIDGE_DIR` | `.` (this repo) | selenoid-bridge directory |
+| `SELENOID_DIR` | `packages/selenoid` | Selenoid source directory |
+| `SELENOID_IMAGES_DIR` | `packages/images` | Images builder directory |
+| `SELENOID_BRIDGE_DIR` | `packages/bridge` | Bridge package directory |
 | `SELENOID_BIN` | `/tmp/selenoid-test` | Built Selenoid binary path |
 | `SELENOID_PORT` | `4444` | Selenoid listen port |
 | `SELENOID_CONFIG` | `/tmp/browsers-test.json` | browsers.json path |
@@ -27,6 +27,7 @@ Resolve paths before running commands (assumes workspace root or env vars):
 WORKSPACE="${SELENOID_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 BRIDGE_DIR="${SELENOID_BRIDGE_DIR:-$WORKSPACE/packages/bridge}"
 SELENOID_DIR="${SELENOID_DIR:-$WORKSPACE/packages/selenoid}"
+SELENOID_IMAGES_DIR="${SELENOID_IMAGES_DIR:-$WORKSPACE/packages/images}"
 SELENOID_BIN="${SELENOID_BIN:-/tmp/selenoid-test}"
 SELENOID_PORT="${SELENOID_PORT:-4444}"
 SELENOID_CONFIG="${SELENOID_CONFIG:-/tmp/browsers-test.json}"
