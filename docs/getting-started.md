@@ -57,6 +57,8 @@ EOF
 curl -s http://localhost:4444/ping
 ```
 
+`-limit` 은 동시에 열 수 있는 브라우저 세션 수입니다. `bridge run --concurrency` 도 같은 값 이하로 맞추면 Selenoid 큐가 불필요하게 길어지는 것을 피할 수 있습니다.
+
 ### 5. Bridge 설치
 
 ```bash
@@ -84,8 +86,15 @@ node dist/index.js run login-test.json --selenoid http://localhost:4444 --browse
 ```bash
 node dist/index.js run login-test.json \
   --selenoid http://localhost:4444 \
-  --browsers chrome:128.0,firefox:130.0
+  --browsers chrome:128.0,firefox:130.0 \
+  --concurrency 5 \
+  --request-timeout 30000 \
+  --capture failure
 ```
+
+`--selenoid` 는 원격 브라우저 엔진 주소이므로, 스크린샷 캡처는 실행하는 쪽에서 `--capture` 로 제어합니다. 새 템플릿은 기본적으로 실패 단계만 캡처하지만, 이전처럼 모든 단계를 캡처하려면 `--capture all` 을 사용합니다. 캡처를 끄려면 `--capture off` 를 사용합니다.
+
+`--browsers` 는 `browser[:version]` 목록입니다. `chrome` 처럼 버전을 생략하면 Selenoid `browsers.json` 의 기본 버전을 사용합니다. `chrome:128` 처럼 prefix를 넘기면 `128.0` 같은 등록 버전과 매칭됩니다. 이 워크스페이스 기본 Chrome 풀은 `116.0`, `122.0`, `128.0` 이고 직접 빌드한 최신 체크포인트 이미지는 `147.0` 입니다. 다양한 버전을 선택하려면 `browsers.json` 의 `versions` 에 각 버전을 추가하고, 해당 이미지를 미리 pull한 뒤 Selenoid를 reload하세요.
 
 ## Claude Code 스킬 사용
 

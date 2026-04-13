@@ -74,6 +74,8 @@ EOF
 curl -s http://localhost:4444/ping
 ```
 
+운영 기본값은 Selenoid `-limit` 과 bridge `--concurrency` 를 같은 값으로 맞추는 것입니다. 긴 시나리오에서는 스크린샷 IO 비용을 줄이기 위해 기본 캡처 정책인 `failure` 를 유지하고, 디버깅할 때만 `--capture all` 을 사용합니다.
+
 ### 4. Build the bridge CLI
 
 ```bash
@@ -113,8 +115,14 @@ node dist/index.js create "checkout-flow" \
 node dist/index.js run checkout-flow.json \
   --selenoid http://localhost:4444 \
   --browsers chrome:128.0,firefox:130.0 \
-  --capture all
+  --concurrency 5 \
+  --request-timeout 30000 \
+  --capture failure
 ```
+
+`--selenoid` 는 원격 브라우저 엔진 주소이므로 캡처 정책은 실행하는 쪽에서 제어합니다. 새 템플릿은 `"capture": "failure"` 로 생성되지만, 이전처럼 모든 단계 캡처가 필요하면 실행 시 `--capture all` 을 넘기면 됩니다. 완전히 끄려면 `--capture off` 를 사용하세요.
+
+`--browsers` 는 `browser[:version]` 목록입니다. `--browsers chrome` 은 Selenoid 설정의 `chrome.default` 를 사용하고, `--browsers chrome:128` 은 `browsers.json` 의 `versions` 중 `128` 로 시작하는 버전을 선택합니다. 이 워크스페이스 기본 Chrome 풀은 Selenoid prebuilt 태그 기준으로 `116.0`, `122.0`, `128.0` 이고, 직접 빌드한 최신 체크포인트 이미지는 `147.0` 입니다. 여러 버전을 돌리려면 `--browsers chrome:116.0,chrome:122.0,chrome:128.0,chrome:147.0` 처럼 넘기고, Selenoid 쪽 설정과 Docker image pull을 먼저 맞춰야 합니다.
 
 실행 결과는 기본적으로 `packages/bridge/artifacts/<scenario>-<timestamp>/` 아래에 생성됩니다.
 
@@ -153,6 +161,7 @@ node dist/index.js run checkout-flow.json --selenoid http://localhost:4444 --bro
 
 - `docs/getting-started.md` - 설치와 기본 실행 흐름
 - `docs/architecture.md` - 컴포넌트 구조와 데이터 흐름
+- `docs/browser-image-checkpoints.md` - 브라우저 이미지 풀과 최신 Chrome 체크포인트 운영 방식
 - `docs/tailscale-setup.md` - Tailscale 원격 접근 방식
 - `packages/bridge/README.md` - 시나리오 포맷과 리포트 상세
 - `packages/selenoid/README.md` - Selenoid 자체 문서

@@ -20,6 +20,7 @@ Set these environment variables to customize paths. Defaults assume the `selenoi
 | `SELENOID_PORT` | `4444` | Selenoid listen port |
 | `SELENOID_CONFIG` | `/tmp/browsers-test.json` | browsers.json path |
 | `SELENOID_LIMIT` | `5` | Max concurrent sessions |
+| `SELENOID_REQUEST_TIMEOUT_MS` | `30000` | Bridge WebDriver request timeout |
 
 Resolve paths before running commands (assumes workspace root or env vars):
 
@@ -32,6 +33,7 @@ SELENOID_BIN="${SELENOID_BIN:-/tmp/selenoid-test}"
 SELENOID_PORT="${SELENOID_PORT:-4444}"
 SELENOID_CONFIG="${SELENOID_CONFIG:-/tmp/browsers-test.json}"
 SELENOID_LIMIT="${SELENOID_LIMIT:-5}"
+SELENOID_REQUEST_TIMEOUT_MS="${SELENOID_REQUEST_TIMEOUT_MS:-30000}"
 SELENOID_URL="http://localhost:$SELENOID_PORT"
 ```
 
@@ -62,7 +64,15 @@ Set up the complete testing environment:
 
    Chrome entry format:
    ```json
-   { "image": "selenoid/chrome:128.0", "port": "4444", "path": "/" }
+   {
+     "image": "selenoid/chrome:128.0",
+     "port": "4444",
+     "path": "/",
+     "shmSize": 2147483648,
+     "tmpfs": { "/tmp": "size=512m" },
+     "mem": "1g",
+     "cpu": "1.0"
+   }
    ```
    Firefox entry format:
    ```json
@@ -151,10 +161,38 @@ Run tests on Selenoid:
    ```bash
    cd "$BRIDGE_DIR" && node dist/index.js run "<scenario.json>" \
      --selenoid "$SELENOID_URL" \
-     --browsers "<browser-list>"
+     --browsers "<browser-list>" \
+     --concurrency "$SELENOID_LIMIT" \
+     --request-timeout "$SELENOID_REQUEST_TIMEOUT_MS" \
+     --capture failure
    ```
 
 4. Report: exit code 0 = all passed, 1 = failures. Add `--output report.json` for JSON report.
+
+Capture policy is controlled by the runner because `--selenoid` points to a reusable local or remote browser engine. Generated templates use `capture: "failure"` to reduce screenshot IO, but a caller can enable the previous all-step capture behavior per run:
+
+```bash
+cd "$BRIDGE_DIR" && node dist/index.js run "<scenario.json>" \
+  --selenoid "$SELENOID_URL" \
+  --browsers "<browser-list>" \
+  --capture all
+```
+
+Use `--capture off` to disable screenshots for a run. `--capture all` and `--capture off` override step-level capture preferences, so the execution side can turn captures on or off without editing the scenario JSON. The default `--capture failure` keeps step-level preferences when they are present.
+
+Browser list syntax is `browser[:version]`. When the version is omitted, such as `--browsers chrome`, the bridge omits `browserVersion` and lets Selenoid use the browser's configured `default`. Prefix versions are supported by Selenoid, so `chrome:128` can match a configured `128.0` entry. The workspace's default Chrome pool is `116.0`, `122.0`, and `128.0`, based on available Selenoid prebuilt tags. The latest checkpoint image is `bangjunclover/selenoid-chrome:147.0`. To run several versions, register every version in `browsers.json`, pull every referenced image, reload Selenoid, then pass a comma-separated list:
+
+```bash
+docker pull selenoid/chrome:116.0
+docker pull selenoid/chrome:122.0
+docker pull selenoid/chrome:128.0
+docker pull bangjunclover/selenoid-chrome:147.0
+pkill -HUP -f selenoid-test
+
+cd "$BRIDGE_DIR" && node dist/index.js run "<scenario.json>" \
+  --selenoid "$SELENOID_URL" \
+  --browsers chrome:116.0,chrome:122.0,chrome:128.0,chrome:147.0
+```
 
 ### `/e2e-test status`
 

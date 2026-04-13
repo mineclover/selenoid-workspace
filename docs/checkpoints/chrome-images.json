@@ -1,0 +1,65 @@
+{
+  "generatedAt": "2026-04-12T12:28:52Z",
+  "policy": {
+    "runtimePool": "Keep a small set of prebuilt Selenoid Chrome images available locally for normal E2E runs.",
+    "latestBuild": "Store exact upstream checkpoints for the current Chrome stable build, then build a local Selenoid-compatible image only when needed.",
+    "why": "Docker Hub selenoid/chrome prebuilt tags currently stop at 128.0, while Chrome stable is newer. Avoid floating latest inputs for reproducible test infrastructure."
+  },
+  "prebuiltRuntimePool": [
+    {
+      "browser": "chrome",
+      "version": "116.0",
+      "image": "selenoid/chrome:116.0",
+      "digest": "sha256:2828cfe3fea28ed028ed597b136024c868c55c772fceb8d19b026d0eacd3da2b",
+      "sizeBytes": 477747099,
+      "source": "docker-hub"
+    },
+    {
+      "browser": "chrome",
+      "version": "122.0",
+      "image": "selenoid/chrome:122.0",
+      "digest": "sha256:93f96bd191a22ddcfd9119b0217ac200e903f319535a9ad5c41c749e54bf6609",
+      "sizeBytes": 480733755,
+      "source": "docker-hub"
+    },
+    {
+      "browser": "chrome",
+      "version": "128.0",
+      "image": "selenoid/chrome:128.0",
+      "digest": "sha256:0a3626278323dc19584598fcc9d4209a4c1dc5ef2065b29812f1dc277d6e0640",
+      "sizeBytes": 485801066,
+      "source": "docker-hub"
+    }
+  ],
+  "latestStableBuildCheckpoint": {
+    "browser": "chrome",
+    "channel": "stable",
+    "targetMajor": "147.0",
+    "chromeForTesting": {
+      "version": "147.0.7727.56",
+      "revision": "1596535",
+      "source": "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json"
+    },
+    "googleChromeDeb": {
+      "package": "google-chrome-stable",
+      "version": "147.0.7727.55-1",
+      "filename": "pool/main/g/google-chrome-stable/google-chrome-stable_147.0.7727.55-1_amd64.deb",
+      "sizeBytes": 125064328,
+      "sha256": "377b972c143e90cb6d4ca31a5a28ed1398475d47670e8f7b15e4ba11a42cbb28",
+      "source": "https://dl.google.com/linux/chrome/deb/dists/stable/main/binary-amd64/Packages.gz"
+    },
+    "chromeDriver": {
+      "version": "147.0.7727.56",
+      "platform": "linux64",
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/147.0.7727.56/linux64/chromedriver-linux64.zip",
+      "source": "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json"
+    },
+    "recommendedImage": "bangjunclover/selenoid-chrome:147.0",
+    "pushedImage": {
+      "image": "bangjunclover/selenoid-chrome:147.0",
+      "digest": "sha256:eaee51f7ebbd9b04aa03559f9be439ffac21f673824313412ffcb40810aa024c",
+      "pushedAt": "2026-04-12T16:41:00Z"
+    },
+    "buildCommand": "DOCKER_DEFAULT_PLATFORM=linux/amd64 /tmp/selenoid-images chrome -b 147.0.7727.55-1 -d 147.0.7727.56 -t local/selenoid-chrome:147.0 -t bangjunclover/selenoid-chrome:147.0"
+  }
+}
