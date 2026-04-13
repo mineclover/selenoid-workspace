@@ -127,8 +127,9 @@ Default baseUrl: `https://example.com`
 | `click` | `selector` | Click element |
 | `fill` | `selector`, `value` | Clear and type into input |
 | `select` | `selector`, `value` | Select dropdown option |
-| `check` | `selector` | Toggle checkbox |
+| `check` | `selector` | Check element if it is not already selected |
 | `hover` | `selector` | Hover over element |
+| `scroll` | `selector` or `direction` | Scroll an element into view or scroll page up/down |
 | `press` | `key` | Press keyboard key (Enter, Tab, Escape, etc.) |
 | `wait` | `ms` or `selector` | Wait for time or element |
 | `assert` | `type` + (`selector` and/or `expected`) | Verify condition |
