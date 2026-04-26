@@ -7,3 +7,6 @@
 [submodule "packages/bridge"]
 	path = packages/bridge
 	url = https://github.com/mineclover/selenoid-bridge.git
+[submodule "packages/hyperframes"]
+	path = packages/hyperframes
+	url = https://github.com/heygen-com/hyperframes
