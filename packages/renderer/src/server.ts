@@ -113,6 +113,31 @@ function readImageSize(buf: Buffer, ext: string): ImageSize | null {
       const bits = buf.readUInt32LE(21);
       return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
     }
+    if (t === "VP8X") {
+      // VP8X canvas dimensions: 3-byte LE at offsets 24 and 27, each value+1
+      const width  = (buf[24] | (buf[25] << 8) | (buf[26] << 16)) + 1;
+      const height = (buf[27] | (buf[28] << 8) | (buf[29] << 16)) + 1;
+      return { width, height };
+    }
+    return null;
+  }
+  if (e === "avif") {
+    // ISOBMFF: first box is ftyp; canvas size is in ispe box inside meta/iprp/ipco
+    if (buf.length < 8) return null;
+    const boxSize = buf.readUInt32BE(0);
+    const boxType = buf.toString("ascii", 4, 8);
+    if (boxType !== "ftyp" || buf.length < boxSize + 8) return null;
+    // Walk boxes to find ispe (image spatial extents)
+    let off = boxSize;
+    while (off + 8 <= buf.length) {
+      const sz  = buf.readUInt32BE(off);
+      const typ = buf.toString("ascii", off + 4, off + 8);
+      if (sz === 0 || sz > buf.length - off) break;
+      if (typ === "ispe" && off + 20 <= buf.length) {
+        return { width: buf.readUInt32BE(off + 12), height: buf.readUInt32BE(off + 16) };
+      }
+      off += sz;
+    }
     return null;
   }
   return null;
@@ -149,7 +174,50 @@ interface SequenceAsset {
   renderMode: "img";
 }
 
-type AssetInfo = SpriteAsset | SequenceAsset;
+// Animated single-file format (animated WebP or AVIF).
+// Pre-decode with ImageDecoder API; seek via pre-built ImageBitmap[].
+interface AnimatedAsset {
+  type: "animated";
+  src: string;
+  width: number;
+  height: number;
+  frameCount: number;
+  mimeType: "image/webp" | "image/avif";
+  renderMode: "canvas";
+}
+
+type AssetInfo = SpriteAsset | SequenceAsset | AnimatedAsset;
+
+// ─── Animated format detection ───────────────────────────────────────────────
+
+function detectAnimatedWebP(buf: Buffer): { frames: number } | null {
+  if (buf.length < 30) return null;
+  if (buf.toString("ascii", 0, 4) !== "RIFF" || buf.toString("ascii", 8, 12) !== "WEBP") return null;
+  if (buf.toString("ascii", 12, 16) !== "VP8X") return null;
+  const flags = buf[20];
+  if ((flags & 0x02) === 0) return null; // ANIM bit not set
+  // Count ANMF chunks for frame count
+  let frameCount = 0;
+  let offset = 12;
+  while (offset + 8 <= buf.length) {
+    const cc   = buf.toString("ascii", offset, offset + 4);
+    const size = buf.readUInt32LE(offset + 4);
+    if (cc === "ANMF") frameCount++;
+    offset += 8 + size + (size & 1); // chunks padded to even size
+  }
+  return { frames: frameCount || 1 };
+}
+
+function detectAnimatedAVIF(buf: Buffer): boolean {
+  if (buf.length < 12) return false;
+  const boxSize = buf.readUInt32BE(0);
+  if (buf.toString("ascii", 4, 8) !== "ftyp") return false;
+  const end = Math.min(boxSize, buf.length);
+  for (let i = 8; i + 4 <= end; i += 4) {
+    if (buf.toString("ascii", i, i + 4) === "avis") return true;
+  }
+  return false;
+}
 
 // ─── Sequence detection ───────────────────────────────────────────────────────
 // Groups files matching  {prefix}_{NNN}.ext  or  {prefix}{NNN}.ext  (2+ digits)
@@ -187,12 +255,34 @@ function buildAssetsScript(
   files: Record<string, string>,
   meta: Record<string, FileMeta>,
 ): string {
-  const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
+  const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif"]);
   const assets: Record<string, AssetInfo> = {};
   const fileNames = Object.keys(files);
+  const processedFileNames = new Set<string>();
 
-  // Detect frame sequences first
-  const sequences = detectSequences(fileNames);
+  // ── Animated single-file formats (WebP/AVIF) ──
+  for (const [name, b64] of Object.entries(files)) {
+    const ext = extname(name).slice(1).toLowerCase();
+    if (ext !== "webp" && ext !== "avif") continue;
+    const buf = Buffer.from(b64, "base64");
+    const size = readImageSize(buf, ext) ?? { width: 0, height: 0 };
+
+    if (ext === "webp") {
+      const anim = detectAnimatedWebP(buf);
+      if (anim) {
+        assets[name] = { type: "animated", src: `./${name}`, width: size.width, height: size.height, frameCount: anim.frames, mimeType: "image/webp", renderMode: "canvas" };
+        processedFileNames.add(name);
+        continue;
+      }
+    }
+    if (ext === "avif" && detectAnimatedAVIF(buf)) {
+      assets[name] = { type: "animated", src: `./${name}`, width: size.width, height: size.height, frameCount: 0, mimeType: "image/avif", renderMode: "canvas" };
+      processedFileNames.add(name);
+    }
+  }
+
+  // ── Frame sequences ──
+  const sequences = detectSequences(fileNames.filter(n => !processedFileNames.has(n)));
   const seqFileNames = new Set<string>();
   for (const [key, seq] of sequences) {
     seq.files.forEach(f => seqFileNames.add(f.name));
@@ -213,9 +303,9 @@ function buildAssetsScript(
     };
   }
 
-  // Process sprite sheets (non-sequence images)
+  // ── Sprite sheets (non-animated, non-sequence images) ──
   for (const [name, b64] of Object.entries(files)) {
-    if (seqFileNames.has(name)) continue;
+    if (processedFileNames.has(name) || seqFileNames.has(name)) continue;
     const ext = extname(name).slice(1).toLowerCase();
     if (!IMAGE_EXTS.has(ext)) continue;
 
@@ -291,7 +381,7 @@ async function renderHtml(req: RenderRequest): Promise<string> {
   // ── Sheet dimension warnings ──
   for (const [name, b64] of Object.entries(files)) {
     const ext = extname(name).slice(1).toLowerCase();
-    if (!["png","jpg","jpeg","gif","webp"].includes(ext)) continue;
+    if (!["png","jpg","jpeg","gif","webp","avif"].includes(ext)) continue;
     const buf = Buffer.from(b64, "base64");
     const size = readImageSize(buf, ext);
     const m = meta[name] ?? {};
@@ -321,8 +411,10 @@ async function renderHtml(req: RenderRequest): Promise<string> {
     for (const [name, a] of Object.entries(parsed)) {
       if (a.type === "sprite") {
         console.log(`[render] sprite "${name}" ${a.width}x${a.height} → ${a.frames}f (${a.rows}r×${a.cols}c @ ${a.frameWidth}x${a.frameHeight}) mode=${a.renderMode}`);
-      } else {
+      } else if (a.type === "sequence") {
         console.log(`[render] sequence "${name}" ${a.frames}f @ ${a.frameWidth}x${a.frameHeight}`);
+      } else {
+        console.log(`[render] animated "${name}" ${a.width}x${a.height} ${a.frameCount}f ${a.mimeType}`);
       }
     }
   }
@@ -334,7 +426,7 @@ async function renderHtml(req: RenderRequest): Promise<string> {
   const MIME: Record<string, string> = {
     html:"text/html", js:"application/javascript", css:"text/css",
     json:"application/json", png:"image/png", jpg:"image/jpeg",
-    jpeg:"image/jpeg", gif:"image/gif", webp:"image/webp",
+    jpeg:"image/jpeg", gif:"image/gif", webp:"image/webp", avif:"image/avif",
     svg:"image/svg+xml", woff:"font/woff", woff2:"font/woff2",
   };
   const fileServer = createServer((httpReq, httpRes) => {
@@ -396,6 +488,160 @@ async function renderHtml(req: RenderRequest): Promise<string> {
   return outputPath;
 }
 
+// ─── Sprite-to-video pipeline ────────────────────────────────────────────────
+
+interface SpriteLayer {
+  name: string;
+  file: string;        // base64 encoded sprite sheet image
+  frameWidth: number;
+  frameHeight: number;
+  rows?: number;       // grid rows (default 1 = horizontal strip)
+  x?: number;          // static canvas x (default 0, ignored if xExpr set)
+  y?: number;          // static canvas y (default 0, ignored if yExpr set)
+  xExpr?: string;      // FFmpeg overlay x expression e.g. "(main_w-overlay_w)*0.5*(1+sin(t*2))"
+  yExpr?: string;      // FFmpeg overlay y expression e.g. "(main_h-overlay_h)*0.5*(1+cos(t*2))"
+  loop?: boolean;      // loop frames to fill duration (default true)
+}
+
+interface SpritesRenderRequest {
+  layers: SpriteLayer[];
+  fps?: number;
+  duration?: number;   // seconds; derived from longest layer if omitted
+  width?: number;
+  height?: number;
+  format?: "mp4" | "webm";
+  quality?: "draft" | "standard" | "high";
+  // transparent: skip black bg and output VP9 WebM with alpha preserved
+  transparent?: boolean;
+}
+
+async function renderSprites(req: SpritesRenderRequest): Promise<string> {
+  const fps     = req.fps     ?? 30;
+  const quality = req.quality ?? "standard";
+  const format  = req.format  ?? "mp4";
+  const width   = req.width   ?? 1280;
+  const height  = req.height  ?? 720;
+
+  const workDir = join(tmpdir(), `hf-sprites-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`);
+  mkdirSync(workDir, { recursive: true });
+
+  // ── Pass 1: compute per-layer frame counts without ffmpeg ──
+  const layerInfos = req.layers.map((layer) => {
+    const rows = Math.max(1, layer.rows ?? 1);
+    const fw   = layer.frameWidth;
+    const fh   = layer.frameHeight;
+    const ext  = extname(layer.name).slice(1).toLowerCase() || "png";
+    const buf  = Buffer.from(layer.file, "base64");
+    const size = readImageSize(buf, ext) ?? { width: fw, height: fh };
+    const cols = Math.max(1, Math.round(size.width / fw));
+    return { layer, rows, cols, totalFrames: rows * cols, fw, fh, ext };
+  });
+
+  const inferredDuration = Math.max(...layerInfos.map(l => l.totalFrames / fps));
+  const duration = req.duration ?? inferredDuration;
+
+  // ── Pass 2: extract PNG frames + build per-layer concat files ──
+  // VP9 WebM intermediate encoding is intentionally skipped:
+  // VP9 stores alpha as a separate video stream that overlay filter cannot read.
+  // PNG frames fed directly via concat demuxer keep full RGBA through the overlay chain.
+  const layerConcats: Array<{ concatPath: string; x: number; y: number }> = [];
+
+  for (let li = 0; li < layerInfos.length; li++) {
+    const { layer, rows, cols, totalFrames, fw, fh, ext } = layerInfos[li];
+    const spritePath = join(workDir, "sprite_" + li + "." + ext);
+    writeFileSync(spritePath, Buffer.from(layer.file, "base64"));
+
+    console.log("[sprites] layer " + li + " \"" + layer.name + "\" " + totalFrames + "f (" + rows + "r×" + cols + "c @ " + fw + "x" + fh + ")");
+
+    // Extract all frames in one ffmpeg call via filter_complex split→crop
+    const framesDir = join(workDir, "layer_" + li + "_frames");
+    mkdirSync(framesDir, { recursive: true });
+
+    const splitOutputs = Array.from({ length: totalFrames }, (_, i) => "[s" + i + "]").join("");
+    const cropFilters  = Array.from({ length: totalFrames }, (_, i) => {
+      const col = i % cols, row = Math.floor(i / cols);
+      return "[s" + i + "]crop=" + fw + ":" + fh + ":" + (col * fw) + ":" + (row * fh) + "[f" + i + "]";
+    }).join(";");
+    const mapArgs: string[] = [];
+    for (let i = 0; i < totalFrames; i++) {
+      mapArgs.push("-map", "[f" + i + "]", "-frames:v", "1", "-y",
+        join(framesDir, "frame_" + String(i).padStart(4, "0") + ".png"));
+    }
+
+    await execFileAsync("ffmpeg", [
+      "-y", "-i", spritePath,
+      "-filter_complex", "[0:v]split=" + totalFrames + splitOutputs + ";" + cropFilters,
+      ...mapArgs,
+    ]);
+
+    // Build concat list with looping to fill requested duration
+    const neededFrames = Math.ceil(duration * fps);
+    const framePath = (i: number) => join(framesDir, "frame_" + String(i).padStart(4, "0") + ".png");
+    const concatLines: string[] = [];
+    for (let fi = 0; fi < neededFrames; fi++) {
+      const idx = layer.loop !== false ? fi % totalFrames : Math.min(fi, totalFrames - 1);
+      concatLines.push("file '" + framePath(idx) + "'", "duration " + (1 / fps).toFixed(8));
+    }
+    const lastIdx = layer.loop !== false
+      ? (neededFrames - 1) % totalFrames
+      : Math.min(neededFrames - 1, totalFrames - 1);
+    concatLines.push("file '" + framePath(lastIdx) + "'");
+
+    const concatPath = join(workDir, "layer_" + li + "_concat.txt");
+    writeFileSync(concatPath, concatLines.join("\n"), "utf-8");
+    layerConcats.push({ concatPath, x: layer.x ?? 0, y: layer.y ?? 0 });
+  }
+
+  // ── Composite: all layers composited in one ffmpeg call ─────────────────────
+  // PNG frames from concat demuxer → rgba pixel format → overlay filter uses
+  // the alpha channel directly. No intermediate codec roundtrip.
+  const transparent = req.transparent ?? false;
+  const outFormat = transparent ? "webm" : (format ?? "mp4");
+  const outputPath = join(RENDERS_DIR, "sprites-" + Date.now() + "." + outFormat);
+  const finalCrf = QUALITY_CRF[quality] ?? 18;
+
+  const safeExpr = (s: string) => s.replace(/[^0-9a-zA-Z_+\-*/().,': ]/g, "");
+
+  const bgColor = transparent ? "0x00000000" : "black";
+  const bgInput = ["-f", "lavfi", "-i",
+    "color=" + bgColor + ":size=" + width + "x" + height + ":rate=" + fps + ":duration=" + duration];
+
+  // Each layer fed as a concat PNG sequence — RGBA preserved end-to-end
+  const layerInputs: string[] = [];
+  for (const lc of layerConcats) {
+    layerInputs.push("-f", "concat", "-safe", "0", "-i", lc.concatPath);
+  }
+
+  // bg → yuva420p ensures format=auto selects YUVA throughout chain
+  const filterParts: string[] = ["[0:v]format=yuva420p[_bg]"];
+  let prev = "_bg";
+  for (let i = 0; i < layerConcats.length; i++) {
+    const lc = layerConcats[i];
+    const layer = req.layers[i];
+    const xPart = layer.xExpr ? "x='" + safeExpr(layer.xExpr) + "'" : "x=" + lc.x;
+    const yPart = layer.yExpr ? "y='" + safeExpr(layer.yExpr) + "'" : "y=" + lc.y;
+    const outLabel = i === layerConcats.length - 1 ? "out" : "t" + i;
+    filterParts.push("[" + prev + "][" + (i + 1) + ":v]overlay=" + xPart + ":" + yPart + ":format=auto:eval=frame[" + outLabel + "]");
+    prev = outLabel;
+  }
+
+  const encodeArgs: string[] = transparent
+    ? ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", String(finalCrf)]
+    : ["-c:v", "libx264", "-crf", String(finalCrf), "-pix_fmt", "yuv420p", "-movflags", "+faststart"];
+
+  await execFileAsync("ffmpeg", [
+    "-y", ...bgInput, ...layerInputs,
+    "-filter_complex", filterParts.join(";"),
+    "-map", "[out]",
+    ...encodeArgs,
+    "-t", String(duration),
+    outputPath,
+  ]);
+
+  rmSync(workDir, { recursive: true, force: true });
+  return outputPath;
+}
+
 // ─── HTTP server ──────────────────────────────────────────────────────────────
 
 function parseBody(req: import("node:http").IncomingMessage): Promise<unknown> {
@@ -437,7 +683,9 @@ const server = createServer(async (req, res) => {
       return;
     }
     const data = readFileSync(entry.path);
-    res.writeHead(200, { "Content-Type": "video/mp4", "Content-Disposition": 'attachment; filename="render.mp4"' });
+    const ext = extname(entry.path).slice(1).toLowerCase();
+    const ct = ext === "webm" ? "video/webm" : ext === "webp" ? "image/webp" : "video/mp4";
+    res.writeHead(200, { "Content-Type": ct, "Content-Disposition": 'attachment; filename="render.' + ext + '"' });
     res.end(data);
     return;
   }
@@ -461,6 +709,37 @@ const server = createServer(async (req, res) => {
 
     try {
       const outputPath = await renderHtml(renderReq);
+      const fileSize = readFileSync(outputPath).length;
+      const token = crypto.randomUUID();
+      outputTokens.set(token, { path: outputPath, expiresMs: Date.now() + 15 * 60_000 });
+      res.writeHead(200);
+      res.end(JSON.stringify({ success: true, outputToken: token, outputUrl: `/outputs/${token}`, fileSize, durationMs: Date.now() - t0 }));
+    } catch (err) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ success: false, error: err instanceof Error ? err.message : String(err), durationMs: Date.now() - t0 }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/render/sprites") {
+    const t0 = Date.now();
+    let body: unknown;
+    try { body = await parseBody(req); }
+    catch (e) {
+      res.writeHead(413);
+      res.end(JSON.stringify({ success: false, error: e instanceof Error ? e.message : "Body parse failed" }));
+      return;
+    }
+
+    const spritesReq = body as SpritesRenderRequest;
+    if (!Array.isArray(spritesReq.layers) || spritesReq.layers.length === 0) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ success: false, error: "layers array required" }));
+      return;
+    }
+
+    try {
+      const outputPath = await renderSprites(spritesReq);
       const fileSize = readFileSync(outputPath).length;
       const token = crypto.randomUUID();
       outputTokens.set(token, { path: outputPath, expiresMs: Date.now() + 15 * 60_000 });
