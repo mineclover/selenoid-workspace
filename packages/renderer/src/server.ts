@@ -8,7 +8,8 @@
  *
  * Routes:
  *   GET  /health
- *   POST /render   { html, fps?, quality?, format?, width?, height? }
+ *   POST /render   { html, files?, fps?, quality?, format?, width?, height? }
+ *     files: { "sprite.png": "<base64>", ... }  — served alongside index.html
  *   GET  /outputs/:token
  */
 
@@ -46,6 +47,9 @@ setInterval(() => {
 
 interface RenderRequest {
   html: string;
+  /** Additional static assets served alongside index.html. Keys are filenames
+   *  (e.g. "sprite.png"), values are base64-encoded file contents. */
+  files?: Record<string, string>;
   fps?: number;
   quality?: "draft" | "standard" | "high";
   format?: "mp4" | "webm";
@@ -62,11 +66,18 @@ async function renderHtml(req: RenderRequest): Promise<string> {
   const width = req.width ?? 1280;
   const height = req.height ?? 720;
 
-  // Write HTML to temp dir
+  // Write HTML and any additional files to temp dir
   const workDir = join(tmpdir(), `hf-render-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`);
   mkdirSync(workDir, { recursive: true });
-  const htmlPath = join(workDir, "index.html");
-  writeFileSync(htmlPath, req.html, "utf-8");
+  writeFileSync(join(workDir, "index.html"), req.html, "utf-8");
+  if (req.files) {
+    for (const [name, b64] of Object.entries(req.files)) {
+      const safeName = name.replace(/\.\./g, "").replace(/^\//, "");
+      const dir = join(workDir, safeName.includes("/") ? safeName.split("/").slice(0, -1).join("/") : "");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(workDir, safeName), Buffer.from(b64, "base64"));
+    }
+  }
 
   const framesDir = join(workDir, "frames");
   mkdirSync(framesDir, { recursive: true });
