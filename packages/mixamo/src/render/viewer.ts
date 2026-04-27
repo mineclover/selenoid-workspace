@@ -214,6 +214,29 @@ function buildBoneMap(root) {
   log('bones: ' + Object.keys(boneMap).length);
 }
 
+// View-aware world → canvas transform.
+// front: mirrors X (char +X → screen left)
+// side:  uses Z as horizontal (char +Z = backward → screen left)
+// back:  no mirror (char +X → screen right)
+function makeToScreen(cx, cy, cz, scale) {
+  if (camView === 'side') {
+    return (wp) => ({
+      x: W / 2 - (wp.z - cz) * scale,
+      y: H / 2 - (wp.y - cy) * scale,
+    });
+  } else if (camView === 'back') {
+    return (wp) => ({
+      x: W / 2 + (wp.x - cx) * scale,
+      y: H / 2 - (wp.y - cy) * scale,
+    });
+  } else {
+    return (wp) => ({
+      x: W / 2 - (wp.x - cx) * scale,
+      y: H / 2 - (wp.y - cy) * scale,
+    });
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Global normalisation — samples the full animation to build a fixed toScreen.
 // Must be called after FBX + mixer are ready. Resets mixer to t=0 when done.
@@ -221,7 +244,9 @@ function buildBoneMap(root) {
 function computeGlobalNorm() {
   if (!mixer || animDuration <= 0) return;
   const N = 40;
-  let gMinX = Infinity, gMaxX = -Infinity, gMinY = Infinity, gMaxY = -Infinity;
+  let gMinX = Infinity, gMaxX = -Infinity;
+  let gMinZ = Infinity, gMaxZ = -Infinity;
+  let gMinY = Infinity, gMaxY = -Infinity;
 
   for (let i = 0; i < N; i++) {
     const t = (i / (N - 1)) * animDuration;
@@ -232,8 +257,9 @@ function computeGlobalNorm() {
       if (!bone) continue;
       const p = new THREE.Vector3();
       bone.getWorldPosition(p);
-      if (!isFinite(p.x) || !isFinite(p.y)) continue;
+      if (!isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)) continue;
       if (p.x < gMinX) gMinX = p.x; if (p.x > gMaxX) gMaxX = p.x;
+      if (p.z < gMinZ) gMinZ = p.z; if (p.z > gMaxZ) gMaxZ = p.z;
       if (p.y < gMinY) gMinY = p.y; if (p.y > gMaxY) gMaxY = p.y;
     }
   }
@@ -244,19 +270,17 @@ function computeGlobalNorm() {
 
   if (!isFinite(gMinX)) return; // no valid bones — fall back to per-frame
 
-  const bboxW = Math.max(gMaxX - gMinX, 1);
-  const bboxH = Math.max(gMaxY - gMinY, 1);
   const bboxCX = (gMinX + gMaxX) / 2;
   const bboxCY = (gMinY + gMaxY) / 2;
+  const bboxCZ = (gMinZ + gMaxZ) / 2;
+  const bboxHoriz = camView === 'side' ? Math.max(gMaxZ - gMinZ, 1) : Math.max(gMaxX - gMinX, 1);
+  const bboxH     = Math.max(gMaxY - gMinY, 1);
   const PAD = 0.10;
   const availW = W * (1 - 2 * PAD);
   const availH = H * (1 - 2 * PAD);
-  const scale = Math.min(availW / bboxW, availH / bboxH);
+  const scale = Math.min(availW / bboxHoriz, availH / bboxH);
 
-  globalToScreen = (wp) => ({
-    x: W / 2 - (wp.x - bboxCX) * scale,
-    y: H / 2 - (wp.y - bboxCY) * scale,
-  });
+  globalToScreen = makeToScreen(bboxCX, bboxCY, bboxCZ, scale);
   log('global norm · h=' + bboxH.toFixed(0) + ' scale=' + scale.toFixed(2));
 }
 
@@ -281,24 +305,25 @@ function computeKeypoints() {
   if (globalToScreen) {
     toScreen = globalToScreen;
   } else {
-    // Per-frame bbox
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    // Per-frame bbox — track X, Z, Y to support all view directions
+    let minX = Infinity, maxX = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
     for (const p of refPts) {
       if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+      if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
       if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
     }
-    const bboxW = Math.max(maxX - minX, 1);
-    const bboxH = Math.max(maxY - minY, 1);
     const bboxCX = (minX + maxX) / 2;
     const bboxCY = (minY + maxY) / 2;
+    const bboxCZ = (minZ + maxZ) / 2;
+    const bboxHoriz = camView === 'side' ? Math.max(maxZ - minZ, 1) : Math.max(maxX - minX, 1);
+    const bboxH     = Math.max(maxY - minY, 1);
     const PAD = 0.10;
     const availW = W * (1 - 2 * PAD);
     const availH = H * (1 - 2 * PAD);
-    const scale = Math.min(availW / bboxW, availH / bboxH);
-    toScreen = (wp) => ({
-      x: W / 2 - (wp.x - bboxCX) * scale,
-      y: H / 2 - (wp.y - bboxCY) * scale,
-    });
+    const scale = Math.min(availW / bboxHoriz, availH / bboxH);
+    toScreen = makeToScreen(bboxCX, bboxCY, bboxCZ, scale);
   }
 
   // 5. Direct bone mappings
@@ -330,35 +355,40 @@ function computeKeypoints() {
     // Nose: below head top centre
     kps[0]  = toScreen(new THREE.Vector3(headWP.x, headWP.y - headLen * 0.28, headWP.z));
 
-    // Eyes (character's R is on screen right because we mirror X)
+    // Eyes: R = character's +X side, L = character's -X side
+    // (toScreen mirrors +X → screen left, so REye appears on screen left as expected)
     const eyeY    = headWP.y - headLen * 0.18;
     const eyeSpan = headLen * 0.18;
-    kps[15] = toScreen(new THREE.Vector3(headWP.x - eyeSpan, eyeY, headWP.z)); // REye
-    kps[16] = toScreen(new THREE.Vector3(headWP.x + eyeSpan, eyeY, headWP.z)); // LEye
+    kps[15] = toScreen(new THREE.Vector3(headWP.x + eyeSpan, eyeY, headWP.z)); // REye (+X = char right)
+    kps[16] = toScreen(new THREE.Vector3(headWP.x - eyeSpan, eyeY, headWP.z)); // LEye (-X = char left)
 
-    // Ears
+    // Ears: same lateral convention as eyes
     const earY    = headWP.y - headLen * 0.22;
     const earSpan = headLen * 0.34;
-    kps[17] = toScreen(new THREE.Vector3(headWP.x - earSpan, earY, headWP.z)); // REar
-    kps[18] = toScreen(new THREE.Vector3(headWP.x + earSpan, earY, headWP.z)); // LEar
+    kps[17] = toScreen(new THREE.Vector3(headWP.x + earSpan, earY, headWP.z)); // REar (+X)
+    kps[18] = toScreen(new THREE.Vector3(headWP.x - earSpan, earY, headWP.z)); // LEar (-X)
   }
 
-  // Foot extras — approximate from available foot/toe bones
-  if (worldPos['mixamorigLeftToeBase']) {
-    const lt = worldPos['mixamorigLeftToeBase'];
-    kps[20] = toScreen(new THREE.Vector3(lt.x + 5, lt.y, lt.z)); // LSmallToe
+  // Foot extras
+  // SmallToe is lateral to BigToe: left foot pinky is at -X, right foot pinky is at +X.
+  // Offset derived from foot-to-toebase distance for proportional scaling.
+  if (worldPos['mixamorigLeftToeBase'] && worldPos['mixamorigLeftFoot']) {
+    const lt  = worldPos['mixamorigLeftToeBase'];
+    const lf  = worldPos['mixamorigLeftFoot'];
+    const off = lt.distanceTo(lf) * 0.3;
+    kps[20] = toScreen(new THREE.Vector3(lt.x - off, lt.y, lt.z)); // LSmallToe (-X = char left)
   }
   if (worldPos['mixamorigLeftFoot']) {
-    const lf = worldPos['mixamorigLeftFoot'];
-    kps[21] = toScreen(lf); // LHeel ≈ ankle
+    kps[21] = toScreen(worldPos['mixamorigLeftFoot']); // LHeel ≈ ankle
   }
-  if (worldPos['mixamorigRightToeBase']) {
-    const rt = worldPos['mixamorigRightToeBase'];
-    kps[23] = toScreen(new THREE.Vector3(rt.x - 5, rt.y, rt.z)); // RSmallToe
+  if (worldPos['mixamorigRightToeBase'] && worldPos['mixamorigRightFoot']) {
+    const rt  = worldPos['mixamorigRightToeBase'];
+    const rf  = worldPos['mixamorigRightFoot'];
+    const off = rt.distanceTo(rf) * 0.3;
+    kps[23] = toScreen(new THREE.Vector3(rt.x + off, rt.y, rt.z)); // RSmallToe (+X = char right)
   }
   if (worldPos['mixamorigRightFoot']) {
-    const rf = worldPos['mixamorigRightFoot'];
-    kps[24] = toScreen(rf); // RHeel ≈ ankle
+    kps[24] = toScreen(worldPos['mixamorigRightFoot']); // RHeel ≈ ankle
   }
 
   return { kps, toScreen };
