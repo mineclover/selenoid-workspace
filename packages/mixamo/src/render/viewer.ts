@@ -46,6 +46,9 @@ const log = m => { console.log(m); document.getElementById('status').textContent
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // OpenPose BODY_25 spec
+// Keypoint indices & colors: https://github.com/CMU-Perceptual-Computing-Lab/openpose/blob/master/include/openpose/pose/poseParametersRender.hpp
+// Output format (JSON layout): https://github.com/CMU-Perceptual-Computing-Lab/openpose/blob/master/doc/02_output.md
+// ControlNet COCO-18 limb colors: https://github.com/lllyasviel/ControlNet/blob/main/annotator/openpose/__init__.py
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // Mixamo bone → BODY_25 keypoint index (direct mappings only)
