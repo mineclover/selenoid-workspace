@@ -57,7 +57,7 @@ const alias = {
 mkdirSync('/build/renderer-dist', { recursive: true });
 await build({
   bundle: true, platform: 'node', target: 'node22', format: 'esm',
-  external: ['puppeteer', 'puppeteer-core', 'esbuild'],
+  external: ['puppeteer', 'puppeteer-core', 'esbuild', 'sharp'],
   plugins: [alias],
   entryPoints: ['/build/renderer-src/server.ts'],
   outfile: '/build/renderer-dist/server.js',
@@ -101,7 +101,7 @@ COPY --from=builder /build/renderer-dist/server.js ./server.js
 # Install runtime externals: puppeteer (browser automation), esbuild (htmlBundler)
 RUN npm init -y && \
     node -e "var p=JSON.parse(require('fs').readFileSync('package.json'));p.type='module';require('fs').writeFileSync('package.json',JSON.stringify(p,null,2));" && \
-    PUPPETEER_SKIP_DOWNLOAD=true npm install puppeteer puppeteer-core esbuild && \
+    PUPPETEER_SKIP_DOWNLOAD=true npm install puppeteer puppeteer-core esbuild sharp && \
     npx puppeteer browsers install chrome-headless-shell
 
 RUN mkdir -p /renders

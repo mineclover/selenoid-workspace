@@ -36,6 +36,7 @@
 import { createServer } from "node:http";
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { join, extname, basename } from "node:path";
+import sharp from "sharp";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -505,6 +506,19 @@ async function renderHtml(req: RenderRequest): Promise<string> {
   return outputPath;
 }
 
+// ─── Orbit expression evaluator ──────────────────────────────────────────────
+// Evaluates FFmpeg-style overlay expressions (main_w, main_h, overlay_w, overlay_h, t, cos, sin…)
+function evalOrbit(expr: string, vars: { main_w: number; main_h: number; overlay_w: number; overlay_h: number; t: number }): number {
+  const js = expr
+    .replace(/\bcos\b/g, "Math.cos").replace(/\bsin\b/g, "Math.sin")
+    .replace(/\btan\b/g, "Math.tan").replace(/\bsqrt\b/g, "Math.sqrt")
+    .replace(/\babs\b/g, "Math.abs").replace(/\bPI\b/g, "Math.PI");
+  // eslint-disable-next-line no-new-func
+  return new Function("main_w","main_h","overlay_w","overlay_h","t", "return (" + js + ");")(
+    vars.main_w, vars.main_h, vars.overlay_w, vars.overlay_h, vars.t
+  ) as number;
+}
+
 // ─── Sprite-to-video pipeline ────────────────────────────────────────────────
 
 interface SpriteLayer {
@@ -634,56 +648,80 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
 
   const safeExpr = (s: string) => s.replace(/[^0-9a-zA-Z_+\-*/().,': ]/g, "");
 
-  const bgColor = transparent ? "0x00000000" : "black";
-  const bgInput = ["-f", "lavfi", "-i",
-    "color=" + bgColor + ":size=" + width + "x" + height + ":rate=" + fps + ":duration=" + duration];
+  if (format === "webp" || transparent) {
+    // ── RGBA path: Sharp per-frame compositing (Porter-Duff over, full alpha) ─
+    // ffmpeg 5.1's overlay filter does not output alpha in any format option.
+    // Sharp (libvips) composites RGBA layers frame-by-frame with correct alpha.
+    const rgbaPngDir = join(workDir, "rgba_frames");
+    mkdirSync(rgbaPngDir, { recursive: true });
 
-  const layerInputs: string[] = [];
-  for (const lc of layerConcats) {
-    layerInputs.push("-f", "concat", "-safe", "0", "-i", lc.concatPath);
-  }
+    const totalOutputFrames = Math.ceil(duration * fps);
+    for (let fi = 0; fi < totalOutputFrames; fi++) {
+      const t = fi / fps;
+      const composites: Parameters<ReturnType<typeof sharp>["composite"]>[0] = [];
 
-  const filterParts: string[] = ["[0:v]format=yuva420p[_bg]"];
-  let prev = "_bg";
-  for (let i = 0; i < layerConcats.length; i++) {
-    const lc = layerConcats[i];
-    const layer = req.layers[i];
-    const xPart = layer.xExpr ? "x='" + safeExpr(layer.xExpr) + "'" : "x=" + lc.x;
-    const yPart = layer.yExpr ? "y='" + safeExpr(layer.yExpr) + "'" : "y=" + lc.y;
-    const evalPart = (layer.xExpr || layer.yExpr) ? ":eval=frame" : "";
-    const outLabel = i === layerConcats.length - 1 ? "out" : "t" + i;
-    filterParts.push("[" + prev + "][" + (i + 1) + ":v]overlay=" + xPart + ":" + yPart + ":format=auto" + evalPart + "[" + outLabel + "]");
-    prev = outLabel;
-  }
+      for (let li = 0; li < layerConcats.length; li++) {
+        const layer = req.layers[li];
+        const lc = layerConcats[li];
+        const { totalFrames } = layerInfos[li];
+        const shapeIdx = layer.loop !== false ? fi % totalFrames : Math.min(fi, totalFrames - 1);
+        const shapePath = join(frameDirs[li], "frame_" + String(shapeIdx).padStart(4, "0") + ".png");
 
-  if (format === "webp") {
-    // Composite → PNG frame sequence → img2webp animated WebP
-    const compositeDir = join(workDir, "composite");
-    mkdirSync(compositeDir, { recursive: true });
-    // format=rgba forces PNG encoder to write 4-channel RGBA (not rgb24 which drops alpha)
-    const rgbaFilter = filterParts.join(";") + ";[out]format=rgba[out_rgba]";
-    await execFileAsync("ffmpeg", [
-      "-y", ...bgInput, ...layerInputs,
-      "-filter_complex", rgbaFilter,
-      "-map", "[out_rgba]", "-f", "image2", "-pix_fmt", "rgba",
-      "-t", String(duration),
-      join(compositeDir, "frame_%06d.png"),
-    ]);
-    const compositeFiles = readdirSync(compositeDir).filter(f => f.endsWith(".png")).sort().map(f => join(compositeDir, f));
-    const delayMs = String(Math.round(1000 / fps));
-    const qualityArgs: string[] = quality === "high"
-      ? ["-lossless"]
-      : ["-lossy", "-q", quality === "draft" ? "70" : "85", "-m", "4"];
-    await execFileAsync("img2webp", ["-loop", "0", "-d", delayMs, ...qualityArgs, ...compositeFiles, "-o", outputPath]);
-  } else if (transparent) {
-    await execFileAsync("ffmpeg", [
-      "-y", ...bgInput, ...layerInputs,
-      "-filter_complex", filterParts.join(";"),
-      "-map", "[out]",
-      "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", String(finalCrf),
-      "-t", String(duration), outputPath,
-    ]);
+        const x = layer.xExpr
+          ? Math.round(evalOrbit(layer.xExpr, { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
+          : lc.x;
+        const y = layer.yExpr
+          ? Math.round(evalOrbit(layer.yExpr, { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
+          : lc.y;
+
+        composites.push({ input: shapePath, left: x, top: y, blend: "over" });
+      }
+
+      const frameBuf = await sharp({ create: { width, height, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } })
+        .composite(composites)
+        .png()
+        .toBuffer();
+      writeFileSync(join(rgbaPngDir, "frame_" + String(fi).padStart(6, "0") + ".png"), frameBuf);
+    }
+    console.log("[sprites] sharp composited " + totalOutputFrames + " RGBA frames");
+
+    if (format === "webp") {
+      const frames = readdirSync(rgbaPngDir).filter(f => f.endsWith(".png")).sort().map(f => join(rgbaPngDir, f));
+      const delayMs = String(Math.round(1000 / fps));
+      const qualityArgs = quality === "high"
+        ? ["-lossless"]
+        : ["-lossy", "-q", quality === "draft" ? "70" : "85", "-m", "4"];
+      await execFileAsync("img2webp", ["-loop", "0", "-d", delayMs, ...qualityArgs, ...frames, "-o", outputPath]);
+    } else {
+      // transparent webm: RGBA PNGs → VP9 with alpha
+      await execFileAsync("ffmpeg", [
+        "-y", "-framerate", String(fps),
+        "-pattern_type", "glob", "-i", join(rgbaPngDir, "*.png"),
+        "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", String(finalCrf),
+        outputPath,
+      ]);
+    }
+
   } else {
+    // ── Opaque path: overlay on black canvas → MP4 ────────────────────────────
+    const bgInput = ["-f", "lavfi", "-i",
+      "color=black:size=" + width + "x" + height + ":rate=" + fps + ":duration=" + duration];
+    const layerInputs: string[] = [];
+    for (const lc of layerConcats) layerInputs.push("-f", "concat", "-safe", "0", "-i", lc.concatPath);
+
+    const filterParts: string[] = ["[0:v]format=yuva420p[_bg]"];
+    let prev = "_bg";
+    for (let i = 0; i < layerConcats.length; i++) {
+      const lc = layerConcats[i];
+      const layer = req.layers[i];
+      const xPart = layer.xExpr ? "x='" + safeExpr(layer.xExpr) + "'" : "x=" + lc.x;
+      const yPart = layer.yExpr ? "y='" + safeExpr(layer.yExpr) + "'" : "y=" + lc.y;
+      const evalPart = (layer.xExpr || layer.yExpr) ? ":eval=frame" : "";
+      const outLabel = i === layerConcats.length - 1 ? "out" : "t" + i;
+      filterParts.push("[" + prev + "][" + (i + 1) + ":v]overlay=" + xPart + ":" + yPart + ":format=auto" + evalPart + "[" + outLabel + "]");
+      prev = outLabel;
+    }
+
     await execFileAsync("ffmpeg", [
       "-y", ...bgInput, ...layerInputs,
       "-filter_complex", filterParts.join(";"),
