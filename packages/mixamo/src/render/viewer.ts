@@ -83,42 +83,63 @@ const MIXAMO_DIRECT = {
 // 23 RSmallToe ← RightToeBase + small lateral
 // 24 RHeel    ← RightFoot
 
-// BODY_25 limb pairs [kp_a, kp_b, r, g, b] — colors from OpenPose C++ source
+// BODY_25 limb pairs [kp_a, kp_b, r, g, b]
+// Colors follow the ControlNet / COCO-18 standard (controlnet_aux color table).
+// BODY_25 additions (MidHip, feet) use the nearest COCO-18 analogues.
 const BODY25_LIMBS = [
-  [1, 8,  255, 0,   85 ],  // Neck-MidHip
-  [1, 2,  255, 0,   0  ],  // Neck-RShoulder
-  [1, 5,  255, 85,  0  ],  // Neck-LShoulder
-  [2, 3,  255, 170, 0  ],  // RShoulder-RElbow
-  [3, 4,  255, 255, 0  ],  // RElbow-RWrist
-  [5, 6,  170, 255, 0  ],  // LShoulder-LElbow
-  [6, 7,  85,  255, 0  ],  // LElbow-LWrist
-  [8, 9,  0,   255, 0  ],  // MidHip-RHip
-  [9, 10, 0,   255, 85 ],  // RHip-RKnee
-  [10,11, 0,   255, 170],  // RKnee-RAnkle
-  [8, 12, 0,   85,  255],  // MidHip-LHip
-  [12,13, 0,   170, 255],  // LHip-LKnee
-  [13,14, 0,   255, 255],  // LKnee-LAnkle
-  [1, 0,  0,   0,   255],  // Neck-Nose
-  [0, 15, 255, 0,   170],  // Nose-REye
-  [15,17, 170, 0,   255],  // REye-REar
-  [0, 16, 255, 0,   255],  // Nose-LEye
-  [16,18, 85,  0,   255],  // LEye-LEar
-  [14,19, 0,   255, 255],  // LAnkle-LBigToe
+  [1, 8,  255, 0,   85 ],  // Neck-MidHip     (no COCO equiv; warm pink)
+  [1, 2,  255, 0,   0  ],  // Neck-RShoulder  COCO colors[0]
+  [1, 5,  255, 85,  0  ],  // Neck-LShoulder  COCO colors[1]
+  [2, 3,  255, 170, 0  ],  // RShoulder-RElbow COCO colors[2]
+  [3, 4,  255, 255, 0  ],  // RElbow-RWrist   COCO colors[3]
+  [5, 6,  170, 255, 0  ],  // LShoulder-LElbow COCO colors[4]
+  [6, 7,  85,  255, 0  ],  // LElbow-LWrist   COCO colors[5]
+  [8, 9,  0,   255, 0  ],  // MidHip-RHip     ~COCO Neck-RHip colors[6]
+  [9, 10, 0,   255, 85 ],  // RHip-RKnee      COCO colors[7]
+  [10,11, 0,   255, 170],  // RKnee-RAnkle    COCO colors[8]
+  [8, 12, 0,   255, 255],  // MidHip-LHip     ~COCO Neck-LHip colors[9]
+  [12,13, 0,   170, 255],  // LHip-LKnee      COCO colors[10]
+  [13,14, 0,   85,  255],  // LKnee-LAnkle    COCO colors[11]
+  [1, 0,  0,   0,   255],  // Neck-Nose       COCO colors[12]
+  [0, 15, 85,  0,   255],  // Nose-REye       COCO colors[13]
+  [15,17, 170, 0,   255],  // REye-REar       COCO colors[14]
+  [0, 16, 255, 0,   255],  // Nose-LEye       COCO colors[15]
+  [16,18, 255, 0,   170],  // LEye-LEar       COCO colors[16]
+  [14,19, 0,   255, 255],  // LAnkle-LBigToe  (cyan = left foot family)
   [19,20, 0,   255, 255],  // LBigToe-LSmallToe
   [14,21, 0,   255, 255],  // LAnkle-LHeel
-  [11,22, 0,   255, 0  ],  // RAnkle-RBigToe
+  [11,22, 0,   255, 0  ],  // RAnkle-RBigToe  (green = right foot family)
   [22,23, 255, 255, 0  ],  // RBigToe-RSmallToe
   [11,24, 255, 255, 0  ],  // RAnkle-RHeel
 ];
 
-// Per-keypoint colors (for the dot)
+// Per-keypoint dot colors — standard BODY_25 / POSE_BODY_25_COLORS_RENDER
 const KP_COLORS = [
-  '#ff0055','#ff0000','#ff0000','#ffaa00','#ffff00',   // 0-4
-  '#ff5500','#aaff00','#55ff00','#ff0055','#00ff00',   // 5-9
-  '#00ff55','#00ffaa','#0055ff','#00aaff','#00ffff',   // 10-14
-  '#ff00aa','#ff00ff','#aa00ff','#5500ff',             // 15-18
-  '#00ffff','#00ffff','#00ffff',                       // 19-21 (L foot)
-  '#00ff00','#ffff00','#ffff00',                       // 22-24 (R foot)
+  '#ff0055', // 0  Nose       (255,0,85)
+  '#ff0000', // 1  Neck       (255,0,0)
+  '#ff5500', // 2  RShoulder  (255,85,0)
+  '#ffaa00', // 3  RElbow     (255,170,0)
+  '#ffff00', // 4  RWrist     (255,255,0)
+  '#aaff00', // 5  LShoulder  (170,255,0)
+  '#55ff00', // 6  LElbow     (85,255,0)
+  '#00ff00', // 7  LWrist     (0,255,0)
+  '#ff0000', // 8  MidHip     (255,0,0)
+  '#00ff55', // 9  RHip       (0,255,85)
+  '#00ffaa', // 10 RKnee      (0,255,170)
+  '#00ffff', // 11 RAnkle     (0,255,255)
+  '#00aaff', // 12 LHip       (0,170,255)
+  '#0055ff', // 13 LKnee      (0,85,255)
+  '#0000ff', // 14 LAnkle     (0,0,255)
+  '#ff00aa', // 15 REye       (255,0,170)
+  '#aa00ff', // 16 LEye       (170,0,255)
+  '#ff00ff', // 17 REar       (255,0,255)
+  '#5500ff', // 18 LEar       (85,0,255)
+  '#0000ff', // 19 LBigToe    (0,0,255)
+  '#0000ff', // 20 LSmallToe  (0,0,255)
+  '#0000ff', // 21 LHeel      (0,0,255)
+  '#00ffff', // 22 RBigToe    (0,255,255)
+  '#00ffff', // 23 RSmallToe  (0,255,255)
+  '#00ffff', // 24 RHeel      (0,255,255)
 ];
 
 // ── Hand keypoints (OpenPose HAND_21 per hand) ────────────────────────────────
