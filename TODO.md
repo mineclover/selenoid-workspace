@@ -8,22 +8,19 @@
 
 ### 🔴 High
 
-- [ ] **WebDriver 테스트 업데이트** (`tests/webdriver.test.ts`)
-  새 액션(double-click, right-click, upload, press.keys) 단위 테스트 추가.
-  기존 브라우저 capabilities 직렬화 관련 assertion 2건 실패 중 — 확인 후 수정.
+- [x] **WebDriver 테스트 업데이트** (`tests/webdriver.test.ts`)
+  doubleClick/rightClick/pressKeys/uploadFile 테스트 추가 + 기존 2건 실패 수정. 52/52 통과.
 
-- [ ] **CLAUDE.md 액션 문서 갱신**
-  `double-click`, `right-click`, `upload`, `press.keys` 콤보 예시 추가.
+- [x] **CLAUDE.md 액션 문서 갱신**
+  16개 전체 액션 표 + 키 이름 목록 + 콤보 예시 추가.
 
 ### 🟡 Medium
 
-- [ ] **WebDriver 재시도 로직**
-  일시적 네트워크 오류·컨테이너 기동 지연 시 즉시 abort됨.
-  핵심 요청(`createSession`, `navigate`, element 탐색)에 exponential backoff 적용.
+- [x] **WebDriver 재시도 로직**
+  `request()`에 exponential backoff 3회 (300ms/900ms/2700ms) — 네트워크 오류·502/503/504 재시도.
 
-- [ ] **stealth 실패 진단**
-  `applyStealth()`가 `.catch(() => undefined)` 로 소리없이 실패함.
-  CDP 명령 실패 시 warn 로그 추가.
+- [x] **stealth 실패 진단**
+  `applyStealth()` catch → `console.warn` 로 실패 메시지 출력.
 
 ### 🟢 Low
 
@@ -66,14 +63,14 @@
 
 ### 🟡 Medium
 
-- [ ] **browsers.json 자동 갱신 스크립트**
-  `scripts/use-extensions.sh`를 CI/docker-compose 시작 훅으로 연결.
-  `EXTENSIONS_DIR` 미설정 시 `browsers.json` 자동으로 기본값 사용.
+- [x] **browsers.json 자동 갱신**
+  docker-compose `browsers-init` 서비스 추가 — `EXTENSIONS_DIR` 설정 시
+  envsubst로 browsers.template.json → browsers.json 자동 생성 후 selenoid 시작.
 
 ### 🟢 Low
 
-- [ ] **selenoid.go TODO 정리** (`line 59`)
-  `localaddr()` 추출 로직 주석 개선 또는 리팩토링.
+- [x] **selenoid.go TODO 정리** (`line 59`)
+  `localaddr()` 주석을 설명적으로 교체.
 
 - [ ] **브라우저 버전 추가**
   Chrome 149+ 이미지 확인 및 `browsers.json` 업데이트.
