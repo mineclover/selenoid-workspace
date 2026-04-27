@@ -71,6 +71,7 @@ FROM --platform=linux/amd64 node:22-bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    webp \
     ca-certificates \
     fonts-liberation \
     fonts-noto-color-emoji \

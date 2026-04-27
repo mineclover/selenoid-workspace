@@ -34,7 +34,7 @@
  */
 
 import { createServer } from "node:http";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { join, extname, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
@@ -347,7 +347,7 @@ interface RenderRequest {
   meta?: Record<string, FileMeta>;
   fps?: number;
   quality?: "draft" | "standard" | "high";
-  format?: "mp4" | "webm";
+  format?: "mp4" | "webm" | "webp";
   width?: number;
   height?: number;
 }
@@ -477,22 +477,26 @@ async function renderHtml(req: RenderRequest): Promise<string> {
 
   const crf = QUALITY_CRF[quality] ?? 18;
   // Frames are always PNG (BeginFrame only supports jpeg/png; webp → png internally).
-  // Output format is independent of the capture format.
-  const frameGlob = join(framesDir, "*.png");
-  if (format === "webm") {
+  const frameFiles = readdirSync(framesDir).filter(f => f.endsWith(".png")).sort().map(f => join(framesDir, f));
+
+  if (format === "webp") {
+    const delayMs = String(Math.round(1000 / fps));
+    const qualityArgs: string[] = quality === "high"
+      ? ["-lossless"]
+      : ["-lossy", "-q", quality === "draft" ? "70" : "85", "-m", "4"];
+    await execFileAsync("img2webp", ["-loop", "0", "-d", delayMs, ...qualityArgs, ...frameFiles, "-o", outputPath]);
+  } else if (format === "webm") {
     await execFileAsync("ffmpeg", [
       "-y", "-framerate", String(fps),
-      "-pattern_type", "glob", "-i", frameGlob,
-      "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", String(crf),
-      "-pix_fmt", "yuv420p",
+      "-pattern_type", "glob", "-i", join(framesDir, "*.png"),
+      "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", String(crf), "-pix_fmt", "yuv420p",
       outputPath,
     ]);
   } else {
     await execFileAsync("ffmpeg", [
       "-y", "-framerate", String(fps),
-      "-pattern_type", "glob", "-i", frameGlob,
-      "-c:v", "libx264", "-crf", String(crf),
-      "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+      "-pattern_type", "glob", "-i", join(framesDir, "*.png"),
+      "-c:v", "libx264", "-crf", String(crf), "-pix_fmt", "yuv420p", "-movflags", "+faststart",
       outputPath,
     ]);
   }
@@ -522,9 +526,9 @@ interface SpritesRenderRequest {
   duration?: number;   // seconds; derived from longest layer if omitted
   width?: number;
   height?: number;
-  format?: "mp4" | "webm";
+  format?: "mp4" | "webm" | "webp";
   quality?: "draft" | "standard" | "high";
-  // transparent: skip black bg and output VP9 WebM with alpha preserved
+  // transparent: skip black bg and output VP9 WebM / animated WebP with alpha preserved
   transparent?: boolean;
 }
 
@@ -623,8 +627,9 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
   // PNG frames from concat demuxer → rgba pixel format → overlay filter uses
   // the alpha channel directly. No intermediate codec roundtrip.
   const transparent = req.transparent ?? false;
-  const outFormat = transparent ? "webm" : (format ?? "mp4");
-  const outputPath = join(RENDERS_DIR, "sprites-" + Date.now() + "." + outFormat);
+  // webp forces its own output extension regardless of transparent flag
+  const outExt = format === "webp" ? "webp" : transparent ? "webm" : (format ?? "mp4");
+  const outputPath = join(RENDERS_DIR, "sprites-" + Date.now() + "." + outExt);
   const finalCrf = QUALITY_CRF[quality] ?? 18;
 
   const safeExpr = (s: string) => s.replace(/[^0-9a-zA-Z_+\-*/().,': ]/g, "");
@@ -633,13 +638,11 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
   const bgInput = ["-f", "lavfi", "-i",
     "color=" + bgColor + ":size=" + width + "x" + height + ":rate=" + fps + ":duration=" + duration];
 
-  // Each layer fed as a concat PNG sequence — RGBA preserved end-to-end
   const layerInputs: string[] = [];
   for (const lc of layerConcats) {
     layerInputs.push("-f", "concat", "-safe", "0", "-i", lc.concatPath);
   }
 
-  // bg → yuva420p ensures format=auto selects YUVA throughout chain
   const filterParts: string[] = ["[0:v]format=yuva420p[_bg]"];
   let prev = "_bg";
   for (let i = 0; i < layerConcats.length; i++) {
@@ -647,25 +650,46 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
     const layer = req.layers[i];
     const xPart = layer.xExpr ? "x='" + safeExpr(layer.xExpr) + "'" : "x=" + lc.x;
     const yPart = layer.yExpr ? "y='" + safeExpr(layer.yExpr) + "'" : "y=" + lc.y;
-    // opt-C: eval=frame only for layers with motion expressions (static = evaluated once)
     const evalPart = (layer.xExpr || layer.yExpr) ? ":eval=frame" : "";
     const outLabel = i === layerConcats.length - 1 ? "out" : "t" + i;
     filterParts.push("[" + prev + "][" + (i + 1) + ":v]overlay=" + xPart + ":" + yPart + ":format=auto" + evalPart + "[" + outLabel + "]");
     prev = outLabel;
   }
 
-  const encodeArgs: string[] = transparent
-    ? ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", String(finalCrf)]
-    : ["-c:v", "libx264", "-crf", String(finalCrf), "-pix_fmt", "yuv420p", "-movflags", "+faststart"];
-
-  await execFileAsync("ffmpeg", [
-    "-y", ...bgInput, ...layerInputs,
-    "-filter_complex", filterParts.join(";"),
-    "-map", "[out]",
-    ...encodeArgs,
-    "-t", String(duration),
-    outputPath,
-  ]);
+  if (format === "webp") {
+    // Composite → PNG frame sequence → img2webp animated WebP
+    const compositeDir = join(workDir, "composite");
+    mkdirSync(compositeDir, { recursive: true });
+    await execFileAsync("ffmpeg", [
+      "-y", ...bgInput, ...layerInputs,
+      "-filter_complex", filterParts.join(";"),
+      "-map", "[out]", "-f", "image2",
+      "-t", String(duration),
+      join(compositeDir, "frame_%06d.png"),
+    ]);
+    const compositeFiles = readdirSync(compositeDir).filter(f => f.endsWith(".png")).sort().map(f => join(compositeDir, f));
+    const delayMs = String(Math.round(1000 / fps));
+    const qualityArgs: string[] = quality === "high"
+      ? ["-lossless"]
+      : ["-lossy", "-q", quality === "draft" ? "70" : "85", "-m", "4"];
+    await execFileAsync("img2webp", ["-loop", "0", "-d", delayMs, ...qualityArgs, ...compositeFiles, "-o", outputPath]);
+  } else if (transparent) {
+    await execFileAsync("ffmpeg", [
+      "-y", ...bgInput, ...layerInputs,
+      "-filter_complex", filterParts.join(";"),
+      "-map", "[out]",
+      "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", String(finalCrf),
+      "-t", String(duration), outputPath,
+    ]);
+  } else {
+    await execFileAsync("ffmpeg", [
+      "-y", ...bgInput, ...layerInputs,
+      "-filter_complex", filterParts.join(";"),
+      "-map", "[out]",
+      "-c:v", "libx264", "-crf", String(finalCrf), "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+      "-t", String(duration), outputPath,
+    ]);
+  }
 
   rmSync(workDir, { recursive: true, force: true });
   return outputPath;
