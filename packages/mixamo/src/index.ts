@@ -7,6 +7,7 @@ import { captureMixamo } from "./capture.js";
 import { sheetToStrip, loadFramePaths, assembleStrip, removeBackground, extractFrames } from "./frames.js";
 import { buildPrompt, printPrompt } from "./prompt.js";
 import { captureFbx } from "./render/capture.js";
+import { generateSprites } from "./comfy.js";
 
 const program = new Command();
 
@@ -260,6 +261,78 @@ program
         rows: 1,
         loop: true,
       }, null, 2));
+    }
+  });
+
+// ─── generate ─────────────────────────────────────────────────────────────────
+program
+  .command("generate")
+  .description("Generate AI sprites from OpenPose frames using ComfyUI ControlNet")
+  .argument("<frames-dir>", "Directory containing frame_N.png (OpenPose output)")
+  .requiredOption("--model <name>", "ComfyUI checkpoint filename (e.g. v1-5-pruned.safetensors)")
+  .requiredOption("--controlnet <name>", "ControlNet model filename (e.g. control_v11p_sd15_openpose.pth)")
+  .requiredOption("--prompt <text>", "Positive prompt for AI generation")
+  .option("--negative <text>", "Negative prompt", "lowres, blurry, bad anatomy, extra limbs, watermark")
+  .option("--strength <n>", "ControlNet strength", "1.0")
+  .option("--width <n>", "Output width px", "512")
+  .option("--height <n>", "Output height px", "1024")
+  .option("--steps <n>", "Sampling steps", "20")
+  .option("--cfg <n>", "CFG scale", "7")
+  .option("--seed <n>", "Base seed (incremented per frame; random if omitted)")
+  .option("--sampler <name>", "Sampler name", "euler")
+  .option("--scheduler <name>", "Scheduler name", "normal")
+  .option("--comfyui <url>", "ComfyUI base URL (submit + collect when provided)", "http://127.0.0.1:8188")
+  .option("--workflow-out <dir>", "Save per-frame workflow JSONs to this directory")
+  .option("-o, --output <dir>", "Output directory for generated images", "./generated")
+  .action(async (framesDir: string, opts: {
+    model: string; controlnet: string; prompt: string; negative: string;
+    strength: string; width: string; height: string;
+    steps: string; cfg: string; seed?: string;
+    sampler: string; scheduler: string;
+    comfyui: string; workflowOut?: string; output: string;
+  }) => {
+    const outDir = resolve(opts.output);
+
+    // Probe ComfyUI reachability; proceed without submission if unreachable
+    let comfyUrl: string | undefined = opts.comfyui;
+    try {
+      const probe = await fetch(`${comfyUrl}/system_stats`, { signal: AbortSignal.timeout(3000) });
+      if (!probe.ok) throw new Error(`status ${probe.status}`);
+      console.log(`ComfyUI: ${comfyUrl} ✓`);
+    } catch {
+      console.warn(`ComfyUI unreachable at ${comfyUrl} — saving workflow JSONs only`);
+      comfyUrl = undefined;
+    }
+
+    if (!opts.workflowOut && !comfyUrl) {
+      console.error("Provide --workflow-out <dir> or ensure ComfyUI is running at --comfyui <url>");
+      process.exit(1);
+    }
+
+    const result = await generateSprites({
+      framesDir:         resolve(framesDir),
+      outputDir:         outDir,
+      prompt:            opts.prompt,
+      negativePrompt:    opts.negative,
+      model:             opts.model,
+      controlnet:        opts.controlnet,
+      controlnetStrength: parseFloat(opts.strength),
+      width:             parseInt(opts.width, 10),
+      height:            parseInt(opts.height, 10),
+      steps:             parseInt(opts.steps, 10),
+      cfg:               parseFloat(opts.cfg),
+      seed:              opts.seed ? parseInt(opts.seed, 10) : undefined,
+      sampler:           opts.sampler,
+      scheduler:         opts.scheduler,
+      comfyUrl,
+      workflowOut:       opts.workflowOut ? resolve(opts.workflowOut) : undefined,
+    });
+
+    if (result.workflowPaths.length > 0) {
+      console.log(`\nWorkflows: ${result.workflowPaths.length} → ${opts.workflowOut}`);
+    }
+    if (result.generatedPaths.length > 0) {
+      console.log(`Generated: ${result.generatedPaths.length} → ${outDir}`);
     }
   });
 
