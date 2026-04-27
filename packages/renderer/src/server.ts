@@ -648,15 +648,15 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
 
   const safeExpr = (s: string) => s.replace(/[^0-9a-zA-Z_+\-*/().,': ]/g, "");
 
-  if (format === "webp" || transparent) {
-    // ── RGBA path: Sharp per-frame compositing (Porter-Duff over, full alpha) ─
-    // ffmpeg 5.1's overlay filter does not output alpha in any format option.
-    // Sharp (libvips) composites RGBA layers frame-by-frame with correct alpha.
-    const rgbaPngDir = join(workDir, "rgba_frames");
-    mkdirSync(rgbaPngDir, { recursive: true });
-
+  // ── Shared Sharp compositing helper ──────────────────────────────────────────
+  const SHARP_CONCURRENCY = 8; // frames rendered in parallel
+  async function sharpComposeFrames(outDir: string, alpha: boolean): Promise<void> {
     const totalOutputFrames = Math.ceil(duration * fps);
-    for (let fi = 0; fi < totalOutputFrames; fi++) {
+    const bg = alpha
+      ? { channels: 4 as const, background: { r: 0, g: 0, b: 0, alpha: 0 } }
+      : { channels: 3 as const, background: { r: 0, g: 0, b: 0 } };
+
+    const renderFrame = async (fi: number) => {
       const t = fi / fps;
       const composites: Parameters<ReturnType<typeof sharp>["composite"]>[0] = [];
 
@@ -666,24 +666,32 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
         const { totalFrames } = layerInfos[li];
         const shapeIdx = layer.loop !== false ? fi % totalFrames : Math.min(fi, totalFrames - 1);
         const shapePath = join(frameDirs[li], "frame_" + String(shapeIdx).padStart(4, "0") + ".png");
-
         const x = layer.xExpr
           ? Math.round(evalOrbit(layer.xExpr, { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
           : lc.x;
         const y = layer.yExpr
           ? Math.round(evalOrbit(layer.yExpr, { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
           : lc.y;
-
         composites.push({ input: shapePath, left: x, top: y, blend: "over" });
       }
 
-      const frameBuf = await sharp({ create: { width, height, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } })
-        .composite(composites)
-        .png()
-        .toBuffer();
-      writeFileSync(join(rgbaPngDir, "frame_" + String(fi).padStart(6, "0") + ".png"), frameBuf);
+      const buf = await sharp({ create: { width, height, ...bg } }).composite(composites).png().toBuffer();
+      writeFileSync(join(outDir, "frame_" + String(fi).padStart(6, "0") + ".png"), buf);
+    };
+
+    // Process in batches for parallelism without overwhelming memory
+    for (let start = 0; start < totalOutputFrames; start += SHARP_CONCURRENCY) {
+      const batch = Array.from({ length: Math.min(SHARP_CONCURRENCY, totalOutputFrames - start) }, (_, i) => renderFrame(start + i));
+      await Promise.all(batch);
     }
-    console.log("[sprites] sharp composited " + totalOutputFrames + " RGBA frames");
+    console.log("[sprites] sharp composited " + totalOutputFrames + " frames (alpha=" + alpha + ")");
+  }
+
+  if (format === "webp" || transparent) {
+    // ── RGBA path ─────────────────────────────────────────────────────────────
+    const rgbaPngDir = join(workDir, "rgba_frames");
+    mkdirSync(rgbaPngDir, { recursive: true });
+    await sharpComposeFrames(rgbaPngDir, true);
 
     if (format === "webp") {
       const frames = readdirSync(rgbaPngDir).filter(f => f.endsWith(".png")).sort().map(f => join(rgbaPngDir, f));
@@ -703,31 +711,16 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
     }
 
   } else {
-    // ── Opaque path: overlay on black canvas → MP4 ────────────────────────────
-    const bgInput = ["-f", "lavfi", "-i",
-      "color=black:size=" + width + "x" + height + ":rate=" + fps + ":duration=" + duration];
-    const layerInputs: string[] = [];
-    for (const lc of layerConcats) layerInputs.push("-f", "concat", "-safe", "0", "-i", lc.concatPath);
-
-    const filterParts: string[] = ["[0:v]format=yuva420p[_bg]"];
-    let prev = "_bg";
-    for (let i = 0; i < layerConcats.length; i++) {
-      const lc = layerConcats[i];
-      const layer = req.layers[i];
-      const xPart = layer.xExpr ? "x='" + safeExpr(layer.xExpr) + "'" : "x=" + lc.x;
-      const yPart = layer.yExpr ? "y='" + safeExpr(layer.yExpr) + "'" : "y=" + lc.y;
-      const evalPart = (layer.xExpr || layer.yExpr) ? ":eval=frame" : "";
-      const outLabel = i === layerConcats.length - 1 ? "out" : "t" + i;
-      filterParts.push("[" + prev + "][" + (i + 1) + ":v]overlay=" + xPart + ":" + yPart + ":format=auto" + evalPart + "[" + outLabel + "]");
-      prev = outLabel;
-    }
+    // ── Opaque path: Sharp compositing → MP4 ─────────────────────────────────
+    const opaquePngDir = join(workDir, "opaque_frames");
+    mkdirSync(opaquePngDir, { recursive: true });
+    await sharpComposeFrames(opaquePngDir, false);
 
     await execFileAsync("ffmpeg", [
-      "-y", ...bgInput, ...layerInputs,
-      "-filter_complex", filterParts.join(";"),
-      "-map", "[out]",
+      "-y", "-framerate", String(fps),
+      "-pattern_type", "glob", "-i", join(opaquePngDir, "*.png"),
       "-c:v", "libx264", "-crf", String(finalCrf), "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-      "-t", String(duration), outputPath,
+      outputPath,
     ]);
   }
 
