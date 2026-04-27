@@ -455,7 +455,7 @@ async function renderHtml(req: RenderRequest): Promise<string> {
     console.log(`[render] captureMode=${acquired.captureMode} fps=${fps} ${width}x${height}`);
 
     session = await createCaptureSession(pageUrl, framesDir, {
-      width, height, fps, format: "jpeg",
+      width, height, fps, format: "webp",
       quality: quality === "draft" ? 60 : quality === "high" ? 92 : 80,
     });
     await initializeSession(session);
@@ -476,13 +476,26 @@ async function renderHtml(req: RenderRequest): Promise<string> {
   }
 
   const crf = QUALITY_CRF[quality] ?? 18;
-  await execFileAsync("ffmpeg", [
-    "-y", "-framerate", String(fps),
-    "-pattern_type", "glob", "-i", join(framesDir, "*.jpg"),
-    "-c:v", "libx264", "-crf", String(crf),
-    "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-    outputPath,
-  ]);
+  // Frames are always PNG (BeginFrame only supports jpeg/png; webp → png internally).
+  // Output format is independent of the capture format.
+  const frameGlob = join(framesDir, "*.png");
+  if (format === "webm") {
+    await execFileAsync("ffmpeg", [
+      "-y", "-framerate", String(fps),
+      "-pattern_type", "glob", "-i", frameGlob,
+      "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", String(crf),
+      "-pix_fmt", "yuv420p",
+      outputPath,
+    ]);
+  } else {
+    await execFileAsync("ffmpeg", [
+      "-y", "-framerate", String(fps),
+      "-pattern_type", "glob", "-i", frameGlob,
+      "-c:v", "libx264", "-crf", String(crf),
+      "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+      outputPath,
+    ]);
+  }
 
   rmSync(workDir, { recursive: true, force: true });
   return outputPath;
