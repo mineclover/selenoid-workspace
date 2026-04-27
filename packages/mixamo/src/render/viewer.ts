@@ -554,6 +554,9 @@ let mixer = null, animDuration = 0, rootObj = null;
 // null until computeGlobalNorm() runs, then stays fixed for the whole session.
 let globalToScreen = null;
 
+// Approximated keypoints (lower confidence in JSON output)
+const APPROX_KPS = new Set([0, 15, 16, 17, 18, 20, 21, 23, 24]);
+
 window.__hf = {
   duration: 0,
   seek(t) {
@@ -568,6 +571,29 @@ window.__hf = {
     return openpose
       ? opCanvas.toDataURL('image/png')
       : glCanvas.toDataURL('image/png');
+  },
+  // Returns OpenPose JSON payload for the current frame (openpose mode only).
+  // pose_keypoints_2d: 25 × [x, y, confidence]  (direct bone = 1.0, approximated = 0.5)
+  // hand_*_keypoints_2d: 21 × [x, y, confidence]
+  getKeypoints() {
+    if (!openpose) return null;
+    const { kps, toScreen } = computeKeypoints();
+
+    const flatKps = (arr, approxSet) => {
+      const out = [];
+      for (let i = 0; i < arr.length; i++) {
+        const kp = arr[i];
+        out.push(kp ? kp.x : 0, kp ? kp.y : 0, kp ? (approxSet && approxSet.has(i) ? 0.5 : 1.0) : 0.0);
+      }
+      return out;
+    };
+
+    return {
+      pose_keypoints_2d:        flatKps(kps, APPROX_KPS),
+      hand_right_keypoints_2d:  flatKps(computeHandKps('right', toScreen), null),
+      hand_left_keypoints_2d:   flatKps(computeHandKps('left',  toScreen), null),
+      face_keypoints_2d:        [],
+    };
   },
 };
 window.__fbxReady = false;
@@ -619,6 +645,8 @@ function onError(err) {
 if (charUrl || fbxUrl) {
   loader.load(charUrl || fbxUrl, (charFbx) => {
     charFbx.position.set(0, 0, 0);
+    // updateMatrixWorld before bbox so root-level scale/rotation is accounted for
+    charFbx.updateMatrixWorld(true);
     // Only centre if mesh exists (skeleton-only FBX has empty bbox)
     const bbox = new THREE.Box3().setFromObject(charFbx);
     if (!bbox.isEmpty()) {
@@ -631,7 +659,14 @@ if (charUrl || fbxUrl) {
     scene.add(charFbx);
 
     if (animUrl) {
-      loader.load(animUrl, (animFbx) => { onReady(charFbx, animFbx.animations); }, undefined, onError);
+      loader.load(animUrl, (animFbx) => {
+        if (!animFbx.animations || animFbx.animations.length === 0) {
+          onError(new Error('animFbx contains no animation clips — check the FBX was exported with animation'));
+          return;
+        }
+        log('anim clips: ' + animFbx.animations.length + ' · tracks: ' + animFbx.animations[0].tracks.length);
+        onReady(charFbx, animFbx.animations);
+      }, undefined, onError);
     } else {
       onReady(charFbx, charFbx.animations);
     }

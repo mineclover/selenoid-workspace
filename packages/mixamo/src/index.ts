@@ -172,6 +172,7 @@ program
   .option("--frustum <n>", "Orthographic frustum height in model units (auto-fit if omitted)")
   .option("--openpose", "Render COCO-18 OpenPose stick figure instead of 3D view")
   .option("--normalize <mode>", "OpenPose camera: global (fixed, shows root motion) | frame (always-fill)", "global")
+  .option("--json", "Save OpenPose JSON keypoints alongside each PNG (openpose mode only)")
   .option("--no-headless", "Show browser window (useful for debugging)")
   .option("-o, --output <dir>", "Output directory for frames")
   .option("--strip <path>", "Also assemble frames into a strip PNG")
@@ -180,7 +181,8 @@ program
     char?: string; anim?: string; fbx?: string;
     frames: string; fps?: string; frameWidth: string; frameHeight: string;
     view: string; bg: string; frustum?: string;
-    openpose?: boolean; normalize: string; headless: boolean; output?: string; strip?: string; video?: string;
+    openpose?: boolean; normalize: string; json?: boolean;
+    headless: boolean; output?: string; strip?: string; video?: string;
   }) => {
     const charPath = resolve(opts.char ?? opts.fbx ?? "");
     const animPath = opts.anim ? resolve(opts.anim) : undefined;
@@ -232,10 +234,14 @@ program
       headless:      opts.headless,
       mode,
       normalize:     opts.normalize as "global" | "frame",
+      saveJson:      opts.json ?? false,
       videoPath,
     });
 
     console.log(`\nFrames: ${result.framePaths.length} → ${outDir}`);
+    if (result.jsonPaths.length > 0) {
+      console.log(`JSON:   ${result.jsonPaths.length} keypoint files → ${outDir}`);
+    }
     if (result.videoPath) {
       console.log(`Video:  ${result.videoPath}`);
     }

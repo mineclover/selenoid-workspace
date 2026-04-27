@@ -18,11 +18,13 @@ export interface FbxCaptureOptions {
   headless?: boolean;
   mode?: "3d" | "openpose";        // openpose: render COCO-18 stick figure
   normalize?: "global" | "frame"; // OpenPose: global=fixed camera, frame=always-fill (default: global)
+  saveJson?: boolean;              // save OpenPose JSON keypoints alongside each PNG (openpose mode only)
   videoPath?: string;              // if set, assemble frames into MP4 with ffmpeg
 }
 
 export interface FbxCaptureResult {
   framePaths: string[];
+  jsonPaths: string[];
   frameWidth: number;
   frameHeight: number;
   duration: number;
@@ -42,17 +44,35 @@ async function waitForFbx(page: Page, timeoutMs = 30_000): Promise<number> {
   return (await result.jsonValue()) as number;
 }
 
-// Seek and capture — calls window.__hf.getFrame() which returns the right canvas
-// (OpenPose 2D canvas in openpose mode, WebGL canvas otherwise)
-async function captureFrame(page: Page, t: number, outPath: string): Promise<void> {
-  const dataUrl = await page.evaluate((seekT: number) => {
-    const hf = (window as unknown as { __hf: { seek(t: number): void; getFrame(): string } }).__hf;
-    hf.seek(seekT);
-    return hf.getFrame();
-  }, t);
+interface HfKeypoints {
+  pose_keypoints_2d: number[];
+  hand_right_keypoints_2d: number[];
+  hand_left_keypoints_2d: number[];
+  face_keypoints_2d: number[];
+}
 
-  const base64 = dataUrl.replace(/^data:image\/png;base64,/, "");
-  writeFileSync(outPath, Buffer.from(base64, "base64"));
+// Seek, capture PNG, and optionally collect keypoints — single evaluate call.
+async function captureFrame(
+  page: Page, t: number, pngPath: string, withJson: boolean
+): Promise<HfKeypoints | null> {
+  const result = await page.evaluate((seekT: number, wantJson: boolean) => {
+    const hf = (window as unknown as {
+      __hf: {
+        seek(t: number): void;
+        getFrame(): string;
+        getKeypoints?(): HfKeypoints | null;
+      }
+    }).__hf;
+    hf.seek(seekT);
+    return {
+      frame:     hf.getFrame(),
+      keypoints: wantJson && hf.getKeypoints ? hf.getKeypoints() : null,
+    };
+  }, t, withJson) as { frame: string; keypoints: HfKeypoints | null };
+
+  const base64 = result.frame.replace(/^data:image\/png;base64,/, "");
+  writeFileSync(pngPath, Buffer.from(base64, "base64"));
+  return result.keypoints;
 }
 
 export async function captureFbx(opts: FbxCaptureOptions): Promise<FbxCaptureResult> {
@@ -66,6 +86,7 @@ export async function captureFbx(opts: FbxCaptureOptions): Promise<FbxCaptureRes
     headless    = true,
     mode        = "3d",
     normalize   = "global",
+    saveJson    = false,
     videoPath,
   } = opts;
 
@@ -95,6 +116,7 @@ export async function captureFbx(opts: FbxCaptureOptions): Promise<FbxCaptureRes
 
   const page: Page = await browser.newPage();
   const framePaths: string[] = [];
+  const jsonPaths:  string[] = [];
 
   page.on("console", msg => console.log(`[browser ${msg.type()}] ${msg.text()}`));
   page.on("pageerror", err => console.error(`[browser error] ${err.message}`));
@@ -118,14 +140,33 @@ export async function captureFbx(opts: FbxCaptureOptions): Promise<FbxCaptureRes
 
     const pad = String(totalFrames - 1).length;
 
+    const withJson = saveJson && mode === "openpose";
+
     for (let i = 0; i < totalFrames; i++) {
       const t = fps ? i / fps : (totalFrames === 1 ? 0 : (i / (totalFrames - 1)) * duration);
-      const outPath = join(outputDir, `frame_${String(i).padStart(pad, "0")}.png`);
-      await captureFrame(page, t, outPath);
+      const stem    = `frame_${String(i).padStart(pad, "0")}`;
+      const pngPath = join(outputDir, `${stem}.png`);
+      const kpData  = await captureFrame(page, t, pngPath, withJson);
       if (i % 10 === 0 || i === totalFrames - 1) {
         console.log(`[render] frame ${i + 1}/${totalFrames} t=${t.toFixed(3)}s`);
       }
-      framePaths.push(outPath);
+      framePaths.push(pngPath);
+
+      if (kpData) {
+        const jsonPath = join(outputDir, `${stem}_keypoints.json`);
+        const payload = {
+          version: 1.3,
+          people: [{
+            person_id: [-1],
+            pose_keypoints_2d:       kpData.pose_keypoints_2d,
+            face_keypoints_2d:       kpData.face_keypoints_2d,
+            hand_left_keypoints_2d:  kpData.hand_left_keypoints_2d,
+            hand_right_keypoints_2d: kpData.hand_right_keypoints_2d,
+          }],
+        };
+        writeFileSync(jsonPath, JSON.stringify(payload, null, 2));
+        jsonPaths.push(jsonPath);
+      }
     }
   } finally {
     await browser.close();
@@ -137,7 +178,7 @@ export async function captureFbx(opts: FbxCaptureOptions): Promise<FbxCaptureRes
     outVideoPath = assembleVideo(framePaths, videoPath, opts.fps ?? 30, frameWidth, frameHeight);
   }
 
-  return { framePaths, frameWidth, frameHeight, duration, videoPath: outVideoPath };
+  return { framePaths, jsonPaths, frameWidth, frameHeight, duration, videoPath: outVideoPath };
 }
 
 function assembleVideo(
