@@ -540,57 +540,71 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
   const inferredDuration = Math.max(...layerInfos.map(l => l.totalFrames / fps));
   const duration = req.duration ?? inferredDuration;
 
-  // ── Pass 2: extract PNG frames + build per-layer concat files ──
-  // VP9 WebM intermediate encoding is intentionally skipped:
-  // VP9 stores alpha as a separate video stream that overlay filter cannot read.
-  // PNG frames fed directly via concat demuxer keep full RGBA through the overlay chain.
-  const layerConcats: Array<{ concatPath: string; x: number; y: number }> = [];
-
+  // ── Pass 2a: write sprites to disk ───────────────────────────────────────────
+  const spritePaths: string[] = [];
+  const frameDirs: string[] = [];
+  let totalExtractFrames = 0;
   for (let li = 0; li < layerInfos.length; li++) {
-    const { layer, rows, cols, totalFrames, fw, fh, ext } = layerInfos[li];
-    const spritePath = join(workDir, "sprite_" + li + "." + ext);
-    writeFileSync(spritePath, Buffer.from(layer.file, "base64"));
-
+    const { layer, ext, totalFrames, fw, fh, rows, cols } = layerInfos[li];
+    const sp = join(workDir, "sprite_" + li + "." + ext);
+    writeFileSync(sp, Buffer.from(layer.file, "base64"));
+    spritePaths.push(sp);
+    const fd = join(workDir, "layer_" + li + "_frames");
+    mkdirSync(fd, { recursive: true });
+    frameDirs.push(fd);
+    totalExtractFrames += totalFrames;
     console.log("[sprites] layer " + li + " \"" + layer.name + "\" " + totalFrames + "f (" + rows + "r×" + cols + "c @ " + fw + "x" + fh + ")");
+  }
 
-    // Extract all frames in one ffmpeg call via filter_complex split→crop
-    const framesDir = join(workDir, "layer_" + li + "_frames");
-    mkdirSync(framesDir, { recursive: true });
+  // ── Pass 2b: extract ALL layers' frames in ONE ffmpeg call (opt-B) ──────────
+  // Combining N sprite extractions into a single process eliminates spawn overhead
+  // and lets the OS/ffmpeg pipeline I/O across layers simultaneously.
+  {
+    const inputs: string[] = [];
+    const filters: string[] = [];
+    const maps: string[] = [];
 
-    const splitOutputs = Array.from({ length: totalFrames }, (_, i) => "[s" + i + "]").join("");
-    const cropFilters  = Array.from({ length: totalFrames }, (_, i) => {
-      const col = i % cols, row = Math.floor(i / cols);
-      return "[s" + i + "]crop=" + fw + ":" + fh + ":" + (col * fw) + ":" + (row * fh) + "[f" + i + "]";
-    }).join(";");
-    const mapArgs: string[] = [];
-    for (let i = 0; i < totalFrames; i++) {
-      mapArgs.push("-map", "[f" + i + "]", "-frames:v", "1", "-y",
-        join(framesDir, "frame_" + String(i).padStart(4, "0") + ".png"));
+    for (let li = 0; li < layerInfos.length; li++) {
+      const { totalFrames, fw, fh, cols } = layerInfos[li];
+      inputs.push("-i", spritePaths[li]);
+
+      if (totalFrames === 1) {
+        // Single frame: skip split, direct crop
+        filters.push("[" + li + ":v]crop=" + fw + ":" + fh + ":0:0[l" + li + "f0]");
+      } else {
+        const splitOuts = Array.from({ length: totalFrames }, (_, i) => "[l" + li + "s" + i + "]").join("");
+        filters.push("[" + li + ":v]split=" + totalFrames + splitOuts);
+        for (let i = 0; i < totalFrames; i++) {
+          const col = i % cols, row = Math.floor(i / cols);
+          filters.push("[l" + li + "s" + i + "]crop=" + fw + ":" + fh + ":" + (col * fw) + ":" + (row * fh) + "[l" + li + "f" + i + "]");
+        }
+      }
+      for (let i = 0; i < totalFrames; i++) {
+        maps.push("-map", "[l" + li + "f" + i + "]", "-frames:v", "1", "-y",
+          join(frameDirs[li], "frame_" + String(i).padStart(4, "0") + ".png"));
+      }
     }
 
-    await execFileAsync("ffmpeg", [
-      "-y", "-i", spritePath,
-      "-filter_complex", "[0:v]split=" + totalFrames + splitOutputs + ";" + cropFilters,
-      ...mapArgs,
-    ]);
+    console.log("[sprites] extracting " + totalExtractFrames + " frames (" + layerInfos.length + " sprites) in 1 ffmpeg call");
+    await execFileAsync("ffmpeg", ["-y", ...inputs, "-filter_complex", filters.join(";"), ...maps]);
+  }
 
-    // Build concat list with looping to fill requested duration
-    const neededFrames = Math.ceil(duration * fps);
-    const framePath = (i: number) => join(framesDir, "frame_" + String(i).padStart(4, "0") + ".png");
-    const concatLines: string[] = [];
+  // ── Pass 2c: build per-layer concat files ─────────────────────────────────
+  const neededFrames = Math.ceil(duration * fps);
+  const layerConcats = layerInfos.map((info, li) => {
+    const { layer, totalFrames } = info;
+    const fp = (i: number) => join(frameDirs[li], "frame_" + String(i).padStart(4, "0") + ".png");
+    const lines: string[] = [];
     for (let fi = 0; fi < neededFrames; fi++) {
       const idx = layer.loop !== false ? fi % totalFrames : Math.min(fi, totalFrames - 1);
-      concatLines.push("file '" + framePath(idx) + "'", "duration " + (1 / fps).toFixed(8));
+      lines.push("file '" + fp(idx) + "'", "duration " + (1 / fps).toFixed(8));
     }
-    const lastIdx = layer.loop !== false
-      ? (neededFrames - 1) % totalFrames
-      : Math.min(neededFrames - 1, totalFrames - 1);
-    concatLines.push("file '" + framePath(lastIdx) + "'");
-
+    const lastIdx = layer.loop !== false ? (neededFrames - 1) % totalFrames : Math.min(neededFrames - 1, totalFrames - 1);
+    lines.push("file '" + fp(lastIdx) + "'");
     const concatPath = join(workDir, "layer_" + li + "_concat.txt");
-    writeFileSync(concatPath, concatLines.join("\n"), "utf-8");
-    layerConcats.push({ concatPath, x: layer.x ?? 0, y: layer.y ?? 0 });
-  }
+    writeFileSync(concatPath, lines.join("\n"), "utf-8");
+    return { concatPath, x: layer.x ?? 0, y: layer.y ?? 0 };
+  });
 
   // ── Composite: all layers composited in one ffmpeg call ─────────────────────
   // PNG frames from concat demuxer → rgba pixel format → overlay filter uses
@@ -620,8 +634,10 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
     const layer = req.layers[i];
     const xPart = layer.xExpr ? "x='" + safeExpr(layer.xExpr) + "'" : "x=" + lc.x;
     const yPart = layer.yExpr ? "y='" + safeExpr(layer.yExpr) + "'" : "y=" + lc.y;
+    // opt-C: eval=frame only for layers with motion expressions (static = evaluated once)
+    const evalPart = (layer.xExpr || layer.yExpr) ? ":eval=frame" : "";
     const outLabel = i === layerConcats.length - 1 ? "out" : "t" + i;
-    filterParts.push("[" + prev + "][" + (i + 1) + ":v]overlay=" + xPart + ":" + yPart + ":format=auto:eval=frame[" + outLabel + "]");
+    filterParts.push("[" + prev + "][" + (i + 1) + ":v]overlay=" + xPart + ":" + yPart + ":format=auto" + evalPart + "[" + outLabel + "]");
     prev = outLabel;
   }
 
