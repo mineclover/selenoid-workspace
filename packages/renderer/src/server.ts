@@ -38,7 +38,7 @@ import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync
 import { join, extname, basename } from "node:path";
 import sharp from "sharp";
 import { tmpdir } from "node:os";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import crypto from "node:crypto";
 import {
@@ -648,80 +648,81 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
 
   const safeExpr = (s: string) => s.replace(/[^0-9a-zA-Z_+\-*/().,': ]/g, "");
 
-  // ── Shared Sharp compositing helper ──────────────────────────────────────────
-  const SHARP_CONCURRENCY = 8; // frames rendered in parallel
-  async function sharpComposeFrames(outDir: string, alpha: boolean): Promise<void> {
-    const totalOutputFrames = Math.ceil(duration * fps);
-    const bg = alpha
-      ? { channels: 4 as const, background: { r: 0, g: 0, b: 0, alpha: 0 } }
-      : { channels: 3 as const, background: { r: 0, g: 0, b: 0 } };
+  // ── Sharp → ffmpeg stdin pipe ─────────────────────────────────────────────
+  // Renders frames in parallel batches and streams PNG buffers directly to
+  // ffmpeg stdin. Eliminates ~600 MB of intermediate PNG disk writes.
+  const BATCH = 8;
 
-    const renderFrame = async (fi: number) => {
-      const t = fi / fps;
-      const composites: Parameters<ReturnType<typeof sharp>["composite"]>[0] = [];
+  const ffmpegPipe = (args: string[]) => {
+    const proc = spawn("ffmpeg", args);
+    const errLines: string[] = [];
+    proc.stderr?.on("data", (c: Buffer) => errLines.push(c.toString()));
 
-      for (let li = 0; li < layerConcats.length; li++) {
-        const layer = req.layers[li];
-        const lc = layerConcats[li];
-        const { totalFrames } = layerInfos[li];
-        const shapeIdx = layer.loop !== false ? fi % totalFrames : Math.min(fi, totalFrames - 1);
-        const shapePath = join(frameDirs[li], "frame_" + String(shapeIdx).padStart(4, "0") + ".png");
-        const x = layer.xExpr
-          ? Math.round(evalOrbit(layer.xExpr, { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
-          : lc.x;
-        const y = layer.yExpr
-          ? Math.round(evalOrbit(layer.yExpr, { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
-          : lc.y;
-        composites.push({ input: shapePath, left: x, top: y, blend: "over" });
-      }
+    const write = (buf: Buffer): Promise<void> =>
+      new Promise<void>((resolve, reject) =>
+        proc.stdin!.write(buf, (err) => err ? reject(err) : resolve())
+      );
 
-      const buf = await sharp({ create: { width, height, ...bg } }).composite(composites).png().toBuffer();
-      writeFileSync(join(outDir, "frame_" + String(fi).padStart(6, "0") + ".png"), buf);
-    };
+    const close = (): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        proc.stdin?.end();
+        proc.on("close", (code) => code === 0
+          ? resolve()
+          : reject(new Error("ffmpeg exit " + code + "\n" + errLines.slice(-8).join("")))
+        );
+        proc.on("error", reject);
+      });
 
-    // Process in batches for parallelism without overwhelming memory
-    for (let start = 0; start < totalOutputFrames; start += SHARP_CONCURRENCY) {
-      const batch = Array.from({ length: Math.min(SHARP_CONCURRENCY, totalOutputFrames - start) }, (_, i) => renderFrame(start + i));
-      await Promise.all(batch);
+    return { write, close };
+  };
+
+  const sharpComposePipe = async (ffmpegArgs: string[], alpha: boolean) => {
+    const totalOut = Math.ceil(duration * fps);
+    const channels = alpha ? 4 as const : 3 as const;
+    const background = alpha ? { r: 0, g: 0, b: 0, alpha: 0 } : { r: 0, g: 0, b: 0 };
+    const { write, close } = ffmpegPipe(ffmpegArgs);
+
+    for (let start = 0; start < totalOut; start += BATCH) {
+      const end = Math.min(start + BATCH, totalOut);
+      const batch = await Promise.all(Array.from({ length: end - start }, async (_, i) => {
+        const fi = start + i;
+        const t = fi / fps;
+        const composites: Parameters<ReturnType<typeof sharp>["composite"]>[0] = [];
+
+        for (let li = 0; li < layerConcats.length; li++) {
+          const layer = req.layers[li];
+          const lc = layerConcats[li];
+          const { totalFrames: lf } = layerInfos[li];
+          const shapeIdx = layer.loop !== false ? fi % lf : Math.min(fi, lf - 1);
+          const shapePath = join(frameDirs[li], "frame_" + String(shapeIdx).padStart(4, "0") + ".png");
+          const x = layer.xExpr
+            ? Math.round(evalOrbit(layer.xExpr, { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
+            : lc.x;
+          const y = layer.yExpr
+            ? Math.round(evalOrbit(layer.yExpr, { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
+            : lc.y;
+          composites.push({ input: shapePath, left: x, top: y, blend: "over" });
+        }
+
+        return sharp({ create: { width, height, channels, background } }).composite(composites).png().toBuffer();
+      }));
+
+      for (const buf of batch) await write(buf);
     }
-    console.log("[sprites] sharp composited " + totalOutputFrames + " frames (alpha=" + alpha + ")");
-  }
 
-  if (format === "webp" || transparent) {
-    // ── RGBA path ─────────────────────────────────────────────────────────────
-    const rgbaPngDir = join(workDir, "rgba_frames");
-    mkdirSync(rgbaPngDir, { recursive: true });
-    await sharpComposeFrames(rgbaPngDir, true);
+    await close();
+    console.log("[sprites] piped " + totalOut + " frames (alpha=" + alpha + ", batch=" + BATCH + ")");
+  };
 
-    if (format === "webp") {
-      const frames = readdirSync(rgbaPngDir).filter(f => f.endsWith(".png")).sort().map(f => join(rgbaPngDir, f));
-      const delayMs = String(Math.round(1000 / fps));
-      const qualityArgs = quality === "high"
-        ? ["-lossless"]
-        : ["-lossy", "-q", quality === "draft" ? "70" : "85", "-m", "4"];
-      await execFileAsync("img2webp", ["-loop", "0", "-d", delayMs, ...qualityArgs, ...frames, "-o", outputPath]);
-    } else {
-      // transparent webm: RGBA PNGs → VP9 with alpha
-      await execFileAsync("ffmpeg", [
-        "-y", "-framerate", String(fps),
-        "-pattern_type", "glob", "-i", join(rgbaPngDir, "*.png"),
-        "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", String(finalCrf),
-        outputPath,
-      ]);
-    }
+  const pipeInput = ["-y", "-f", "image2pipe", "-framerate", String(fps), "-vcodec", "png", "-i", "pipe:0"];
 
+  if (format === "webp") {
+    const q = quality === "high" ? "95" : quality === "draft" ? "70" : "85";
+    await sharpComposePipe([...pipeInput, "-c:v", "libwebp_anim", "-quality", q, "-loop", "0", "-pix_fmt", "yuva420p", outputPath], true);
+  } else if (transparent) {
+    await sharpComposePipe([...pipeInput, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", String(finalCrf), outputPath], true);
   } else {
-    // ── Opaque path: Sharp compositing → MP4 ─────────────────────────────────
-    const opaquePngDir = join(workDir, "opaque_frames");
-    mkdirSync(opaquePngDir, { recursive: true });
-    await sharpComposeFrames(opaquePngDir, false);
-
-    await execFileAsync("ffmpeg", [
-      "-y", "-framerate", String(fps),
-      "-pattern_type", "glob", "-i", join(opaquePngDir, "*.png"),
-      "-c:v", "libx264", "-crf", String(finalCrf), "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-      outputPath,
-    ]);
+    await sharpComposePipe([...pipeInput, "-c:v", "libx264", "-crf", String(finalCrf), "-pix_fmt", "yuv420p", "-movflags", "+faststart", outputPath], false);
   }
 
   rmSync(workDir, { recursive: true, force: true });
