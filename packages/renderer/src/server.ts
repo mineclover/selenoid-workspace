@@ -70,12 +70,13 @@ const CANVAS_THRESHOLD_PX = 512; // frameWidth >= this → renderMode:"canvas"
 // ─── Token store ─────────────────────────────────────────────────────────────
 
 const outputTokens = new Map<string, { path: string; expiresMs: number }>();
+// .unref() so the interval does not prevent graceful process exit
 setInterval(() => {
   const now = Date.now();
   for (const [token, entry] of outputTokens) {
     if (entry.expiresMs < now) outputTokens.delete(token);
   }
-}, 60_000);
+}, 60_000).unref();
 
 // ─── Image dimension parsing ──────────────────────────────────────────────────
 
@@ -397,9 +398,12 @@ async function renderHtml(req: RenderRequest): Promise<string> {
 
   for (const [name, b64] of Object.entries(files)) {
     const safeName = name.replace(/\.\./g, "").replace(/^\//, "");
+    const target = join(workDir, safeName);
+    // Path traversal guard: resolved path must stay inside workDir
+    if (!target.startsWith(workDir + "/") && target !== workDir) continue;
     const dir = join(workDir, safeName.includes("/") ? safeName.split("/").slice(0, -1).join("/") : ".");
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(workDir, safeName), Buffer.from(b64, "base64"));
+    writeFileSync(target, Buffer.from(b64, "base64"));
   }
 
   const assetsScript = buildAssetsScript(files, meta);
@@ -423,6 +427,7 @@ async function renderHtml(req: RenderRequest): Promise<string> {
   const framesDir = join(workDir, "frames");
   mkdirSync(framesDir, { recursive: true });
   const outputPath = join(RENDERS_DIR, `render-${Date.now()}.${format}`);
+  // workDir cleanup is in the outer try/finally below
 
   const MIME: Record<string, string> = {
     html:"text/html", js:"application/javascript", css:"text/css",
@@ -433,6 +438,10 @@ async function renderHtml(req: RenderRequest): Promise<string> {
   const fileServer = createServer((httpReq, httpRes) => {
     const reqPath = decodeURIComponent(httpReq.url?.split("?")[0] ?? "/");
     const filePath = join(workDir, reqPath === "/" ? "index.html" : reqPath);
+    // Path traversal guard: resolved path must stay inside workDir
+    if (!filePath.startsWith(workDir + "/") && filePath !== workDir) {
+      httpRes.writeHead(403); httpRes.end("Forbidden"); return;
+    }
     if (existsSync(filePath)) {
       const ext = extname(filePath).slice(1).toLowerCase();
       httpRes.writeHead(200, { "Content-Type": MIME[ext] ?? "application/octet-stream" });
@@ -476,33 +485,35 @@ async function renderHtml(req: RenderRequest): Promise<string> {
     fileServer.close();
   }
 
-  const crf = QUALITY_CRF[quality] ?? 18;
-  // Frames are always PNG (BeginFrame only supports jpeg/png; webp → png internally).
-  const frameFiles = readdirSync(framesDir).filter(f => f.endsWith(".png")).sort().map(f => join(framesDir, f));
+  try {
+    const crf = QUALITY_CRF[quality] ?? 18;
+    // Frames are always PNG (BeginFrame only supports jpeg/png; webp → png internally).
+    const frameFiles = readdirSync(framesDir).filter(f => f.endsWith(".png")).sort().map(f => join(framesDir, f));
 
-  if (format === "webp") {
-    const delayMs = String(Math.round(1000 / fps));
-    const qualityArgs: string[] = quality === "high"
-      ? ["-lossless"]
-      : ["-lossy", "-q", quality === "draft" ? "70" : "85", "-m", "4"];
-    await execFileAsync("img2webp", ["-loop", "0", "-d", delayMs, ...qualityArgs, ...frameFiles, "-o", outputPath]);
-  } else if (format === "webm") {
-    await execFileAsync("ffmpeg", [
-      "-y", "-framerate", String(fps),
-      "-pattern_type", "glob", "-i", join(framesDir, "*.png"),
-      "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", String(crf), "-pix_fmt", "yuv420p",
-      outputPath,
-    ]);
-  } else {
-    await execFileAsync("ffmpeg", [
-      "-y", "-framerate", String(fps),
-      "-pattern_type", "glob", "-i", join(framesDir, "*.png"),
-      "-c:v", "libx264", "-crf", String(crf), "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-      outputPath,
-    ]);
+    if (format === "webp") {
+      const delayMs = String(Math.round(1000 / fps));
+      const qualityArgs: string[] = quality === "high"
+        ? ["-lossless"]
+        : ["-lossy", "-q", quality === "draft" ? "70" : "85", "-m", "4"];
+      await execFileAsync("img2webp", ["-loop", "0", "-d", delayMs, ...qualityArgs, ...frameFiles, "-o", outputPath]);
+    } else if (format === "webm") {
+      await execFileAsync("ffmpeg", [
+        "-y", "-framerate", String(fps),
+        "-pattern_type", "glob", "-i", join(framesDir, "*.png"),
+        "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", String(crf), "-pix_fmt", "yuv420p",
+        outputPath,
+      ]);
+    } else {
+      await execFileAsync("ffmpeg", [
+        "-y", "-framerate", String(fps),
+        "-pattern_type", "glob", "-i", join(framesDir, "*.png"),
+        "-c:v", "libx264", "-crf", String(crf), "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        outputPath,
+      ]);
+    }
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
   }
-
-  rmSync(workDir, { recursive: true, force: true });
   return outputPath;
 }
 
@@ -649,8 +660,6 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
   const safeExpr = (s: string) => s.replace(/[^0-9a-zA-Z_+\-*/().,': ]/g, "");
 
   // ── Sharp → ffmpeg stdin pipe ─────────────────────────────────────────────
-  // Renders frames in parallel batches and streams PNG buffers directly to
-  // ffmpeg stdin. Eliminates ~600 MB of intermediate PNG disk writes.
   const BATCH = 8;
 
   const ffmpegPipe = (args: string[]) => {
@@ -673,59 +682,70 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
         proc.on("error", reject);
       });
 
-    return { write, close };
+    // kill() used on error to prevent zombie processes
+    const kill = () => { try { proc.stdin?.destroy(); proc.kill(); } catch {} };
+    return { write, close, kill };
   };
 
   const sharpComposePipe = async (ffmpegArgs: string[], alpha: boolean) => {
     const totalOut = Math.ceil(duration * fps);
     const channels = alpha ? 4 as const : 3 as const;
     const background = alpha ? { r: 0, g: 0, b: 0, alpha: 0 } : { r: 0, g: 0, b: 0 };
-    const { write, close } = ffmpegPipe(ffmpegArgs);
+    const { write, close, kill } = ffmpegPipe(ffmpegArgs);
 
-    for (let start = 0; start < totalOut; start += BATCH) {
-      const end = Math.min(start + BATCH, totalOut);
-      const batch = await Promise.all(Array.from({ length: end - start }, async (_, i) => {
-        const fi = start + i;
-        const t = fi / fps;
-        const composites: Parameters<ReturnType<typeof sharp>["composite"]>[0] = [];
+    try {
+      for (let start = 0; start < totalOut; start += BATCH) {
+        const end = Math.min(start + BATCH, totalOut);
+        // Parallel render, sequential write (ordering required by ffmpeg)
+        const batch = await Promise.all(Array.from({ length: end - start }, async (_, i) => {
+          const fi = start + i;
+          const t = fi / fps;
+          const composites: Parameters<ReturnType<typeof sharp>["composite"]>[0] = [];
 
-        for (let li = 0; li < layerConcats.length; li++) {
-          const layer = req.layers[li];
-          const lc = layerConcats[li];
-          const { totalFrames: lf } = layerInfos[li];
-          const shapeIdx = layer.loop !== false ? fi % lf : Math.min(fi, lf - 1);
-          const shapePath = join(frameDirs[li], "frame_" + String(shapeIdx).padStart(4, "0") + ".png");
-          const x = layer.xExpr
-            ? Math.round(evalOrbit(layer.xExpr, { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
-            : lc.x;
-          const y = layer.yExpr
-            ? Math.round(evalOrbit(layer.yExpr, { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
-            : lc.y;
-          composites.push({ input: shapePath, left: x, top: y, blend: "over" });
-        }
+          for (let li = 0; li < layerConcats.length; li++) {
+            const layer = req.layers[li];
+            const lc = layerConcats[li];
+            const { totalFrames: lf } = layerInfos[li];
+            const shapeIdx = layer.loop !== false ? fi % lf : Math.min(fi, lf - 1);
+            const shapePath = join(frameDirs[li], "frame_" + String(shapeIdx).padStart(4, "0") + ".png");
+            // safeExpr applied before evalOrbit to prevent arbitrary code via new Function()
+            const x = layer.xExpr
+              ? Math.round(evalOrbit(safeExpr(layer.xExpr), { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
+              : lc.x;
+            const y = layer.yExpr
+              ? Math.round(evalOrbit(safeExpr(layer.yExpr), { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
+              : lc.y;
+            composites.push({ input: shapePath, left: x, top: y, blend: "over" });
+          }
 
-        return sharp({ create: { width, height, channels, background } }).composite(composites).png().toBuffer();
-      }));
+          return sharp({ create: { width, height, channels, background } }).composite(composites).png().toBuffer();
+        }));
 
-      for (const buf of batch) await write(buf);
+        for (const buf of batch) await write(buf);
+      }
+    } catch (err) {
+      kill();
+      throw err;
     }
 
     await close();
     console.log("[sprites] piped " + totalOut + " frames (alpha=" + alpha + ", batch=" + BATCH + ")");
   };
 
-  const pipeInput = ["-y", "-f", "image2pipe", "-framerate", String(fps), "-vcodec", "png", "-i", "pipe:0"];
+  try {
+    const pipeInput = ["-y", "-f", "image2pipe", "-framerate", String(fps), "-vcodec", "png", "-i", "pipe:0"];
 
-  if (format === "webp") {
-    const q = quality === "high" ? "95" : quality === "draft" ? "70" : "85";
-    await sharpComposePipe([...pipeInput, "-c:v", "libwebp_anim", "-quality", q, "-loop", "0", "-pix_fmt", "yuva420p", outputPath], true);
-  } else if (transparent) {
-    await sharpComposePipe([...pipeInput, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", String(finalCrf), outputPath], true);
-  } else {
-    await sharpComposePipe([...pipeInput, "-c:v", "libx264", "-crf", String(finalCrf), "-pix_fmt", "yuv420p", "-movflags", "+faststart", outputPath], false);
+    if (format === "webp") {
+      const q = quality === "high" ? "95" : quality === "draft" ? "70" : "85";
+      await sharpComposePipe([...pipeInput, "-c:v", "libwebp_anim", "-quality", q, "-loop", "0", "-pix_fmt", "yuva420p", outputPath], true);
+    } else if (transparent) {
+      await sharpComposePipe([...pipeInput, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", String(finalCrf), outputPath], true);
+    } else {
+      await sharpComposePipe([...pipeInput, "-c:v", "libx264", "-crf", String(finalCrf), "-pix_fmt", "yuv420p", "-movflags", "+faststart", outputPath], false);
+    }
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
   }
-
-  rmSync(workDir, { recursive: true, force: true });
   return outputPath;
 }
 
