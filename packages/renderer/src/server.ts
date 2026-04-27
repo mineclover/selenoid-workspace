@@ -34,8 +34,8 @@
  */
 
 import { createServer } from "node:http";
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
-import { join, extname, basename } from "node:path";
+import { mkdirSync, writeFileSync, readFileSync, createReadStream, readdirSync, existsSync, rmSync, statSync } from "node:fs";
+import { join, extname } from "node:path";
 import sharp from "sharp";
 import { tmpdir } from "node:os";
 import { execFile, spawn } from "node:child_process";
@@ -74,7 +74,10 @@ const outputTokens = new Map<string, { path: string; expiresMs: number }>();
 setInterval(() => {
   const now = Date.now();
   for (const [token, entry] of outputTokens) {
-    if (entry.expiresMs < now) outputTokens.delete(token);
+    if (entry.expiresMs < now) {
+      outputTokens.delete(token);
+      rmSync(entry.path, { force: true });
+    }
   }
 }, 60_000).unref();
 
@@ -518,16 +521,16 @@ async function renderHtml(req: RenderRequest): Promise<string> {
 }
 
 // ─── Orbit expression evaluator ──────────────────────────────────────────────
-// Evaluates FFmpeg-style overlay expressions (main_w, main_h, overlay_w, overlay_h, t, cos, sin…)
-function evalOrbit(expr: string, vars: { main_w: number; main_h: number; overlay_w: number; overlay_h: number; t: number }): number {
+
+type OrbitFn = (main_w: number, main_h: number, overlay_w: number, overlay_h: number, t: number) => number;
+
+function compileOrbit(expr: string): OrbitFn {
   const js = expr
     .replace(/\bcos\b/g, "Math.cos").replace(/\bsin\b/g, "Math.sin")
     .replace(/\btan\b/g, "Math.tan").replace(/\bsqrt\b/g, "Math.sqrt")
     .replace(/\babs\b/g, "Math.abs").replace(/\bPI\b/g, "Math.PI");
   // eslint-disable-next-line no-new-func
-  return new Function("main_w","main_h","overlay_w","overlay_h","t", "return (" + js + ");")(
-    vars.main_w, vars.main_h, vars.overlay_w, vars.overlay_h, vars.t
-  ) as number;
+  return new Function("main_w","main_h","overlay_w","overlay_h","t", "return (" + js + ");") as OrbitFn;
 }
 
 // ─── Sprite-to-video pipeline ────────────────────────────────────────────────
@@ -576,7 +579,7 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
     const buf  = Buffer.from(layer.file, "base64");
     const size = readImageSize(buf, ext) ?? { width: fw, height: fh };
     const cols = Math.max(1, Math.round(size.width / fw));
-    return { layer, rows, cols, totalFrames: rows * cols, fw, fh, ext };
+    return { layer, rows, cols, totalFrames: rows * cols, fw, fh, ext, buf };
   });
 
   const inferredDuration = Math.max(...layerInfos.map(l => l.totalFrames / fps));
@@ -589,7 +592,7 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
   for (let li = 0; li < layerInfos.length; li++) {
     const { layer, ext, totalFrames, fw, fh, rows, cols } = layerInfos[li];
     const sp = join(workDir, "sprite_" + li + "." + ext);
-    writeFileSync(sp, Buffer.from(layer.file, "base64"));
+    writeFileSync(sp, layerInfos[li].buf);
     spritePaths.push(sp);
     const fd = join(workDir, "layer_" + li + "_frames");
     mkdirSync(fd, { recursive: true });
@@ -631,22 +634,14 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
     await execFileAsync("ffmpeg", ["-y", ...inputs, "-filter_complex", filters.join(";"), ...maps]);
   }
 
-  // ── Pass 2c: build per-layer concat files ─────────────────────────────────
-  const neededFrames = Math.ceil(duration * fps);
-  const layerConcats = layerInfos.map((info, li) => {
-    const { layer, totalFrames } = info;
-    const fp = (i: number) => join(frameDirs[li], "frame_" + String(i).padStart(4, "0") + ".png");
-    const lines: string[] = [];
-    for (let fi = 0; fi < neededFrames; fi++) {
-      const idx = layer.loop !== false ? fi % totalFrames : Math.min(fi, totalFrames - 1);
-      lines.push("file '" + fp(idx) + "'", "duration " + (1 / fps).toFixed(8));
-    }
-    const lastIdx = layer.loop !== false ? (neededFrames - 1) % totalFrames : Math.min(neededFrames - 1, totalFrames - 1);
-    lines.push("file '" + fp(lastIdx) + "'");
-    const concatPath = join(workDir, "layer_" + li + "_concat.txt");
-    writeFileSync(concatPath, lines.join("\n"), "utf-8");
-    return { concatPath, x: layer.x ?? 0, y: layer.y ?? 0 };
-  });
+  // ── Pass 2c: pre-compile per-layer orbit expressions and static offsets ──────
+  const safeExpr = (s: string) => s.replace(/[^0-9a-zA-Z_+\-*/().,': ]/g, "");
+  const layerMeta = req.layers.map((layer) => ({
+    x: layer.x ?? 0,
+    y: layer.y ?? 0,
+    xFn: layer.xExpr ? compileOrbit(safeExpr(layer.xExpr)) : null,
+    yFn: layer.yExpr ? compileOrbit(safeExpr(layer.yExpr)) : null,
+  }));
 
   // ── Composite: all layers composited in one ffmpeg call ─────────────────────
   // PNG frames from concat demuxer → rgba pixel format → overlay filter uses
@@ -656,8 +651,6 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
   const outExt = format === "webp" ? "webp" : transparent ? "webm" : (format ?? "mp4");
   const outputPath = join(RENDERS_DIR, "sprites-" + Date.now() + "." + outExt);
   const finalCrf = QUALITY_CRF[quality] ?? 18;
-
-  const safeExpr = (s: string) => s.replace(/[^0-9a-zA-Z_+\-*/().,': ]/g, "");
 
   // ── Sharp → ffmpeg stdin pipe ─────────────────────────────────────────────
   const BATCH = 8;
@@ -702,19 +695,18 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
           const t = fi / fps;
           const composites: Parameters<ReturnType<typeof sharp>["composite"]>[0] = [];
 
-          for (let li = 0; li < layerConcats.length; li++) {
+          for (let li = 0; li < layerMeta.length; li++) {
             const layer = req.layers[li];
-            const lc = layerConcats[li];
+            const lm = layerMeta[li];
             const { totalFrames: lf } = layerInfos[li];
             const shapeIdx = layer.loop !== false ? fi % lf : Math.min(fi, lf - 1);
             const shapePath = join(frameDirs[li], "frame_" + String(shapeIdx).padStart(4, "0") + ".png");
-            // safeExpr applied before evalOrbit to prevent arbitrary code via new Function()
-            const x = layer.xExpr
-              ? Math.round(evalOrbit(safeExpr(layer.xExpr), { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
-              : lc.x;
-            const y = layer.yExpr
-              ? Math.round(evalOrbit(safeExpr(layer.yExpr), { main_w: width, main_h: height, overlay_w: layer.frameWidth, overlay_h: layer.frameHeight, t }))
-              : lc.y;
+            const x = lm.xFn
+              ? Math.round(lm.xFn(width, height, layer.frameWidth, layer.frameHeight, t))
+              : lm.x;
+            const y = lm.yFn
+              ? Math.round(lm.yFn(width, height, layer.frameWidth, layer.frameHeight, t))
+              : lm.y;
             composites.push({ input: shapePath, left: x, top: y, blend: "over" });
           }
 
@@ -789,11 +781,19 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ error: "Not found or expired" }));
       return;
     }
-    const data = readFileSync(entry.path);
     const ext = extname(entry.path).slice(1).toLowerCase();
     const ct = ext === "webm" ? "video/webm" : ext === "webp" ? "image/webp" : "video/mp4";
-    res.writeHead(200, { "Content-Type": ct, "Content-Disposition": 'attachment; filename="render.' + ext + '"' });
-    res.end(data);
+    res.writeHead(200, {
+      "Content-Type": ct,
+      "Content-Length": String(statSync(entry.path).size),
+      "Content-Disposition": 'attachment; filename="render.' + ext + '"',
+    });
+    const stream = createReadStream(entry.path);
+    stream.pipe(res);
+    stream.on("close", () => {
+      outputTokens.delete(token);
+      rmSync(entry.path, { force: true });
+    });
     return;
   }
 
@@ -816,7 +816,7 @@ const server = createServer(async (req, res) => {
 
     try {
       const outputPath = await renderHtml(renderReq);
-      const fileSize = readFileSync(outputPath).length;
+      const fileSize = statSync(outputPath).size;
       const token = crypto.randomUUID();
       outputTokens.set(token, { path: outputPath, expiresMs: Date.now() + 15 * 60_000 });
       res.writeHead(200);
@@ -847,7 +847,7 @@ const server = createServer(async (req, res) => {
 
     try {
       const outputPath = await renderSprites(spritesReq);
-      const fileSize = readFileSync(outputPath).length;
+      const fileSize = statSync(outputPath).size;
       const token = crypto.randomUUID();
       outputTokens.set(token, { path: outputPath, expiresMs: Date.now() + 15 * 60_000 });
       res.writeHead(200);
