@@ -660,10 +660,12 @@ async function renderSprites(req: SpritesRenderRequest): Promise<string> {
     // Composite → PNG frame sequence → img2webp animated WebP
     const compositeDir = join(workDir, "composite");
     mkdirSync(compositeDir, { recursive: true });
+    // format=rgba forces PNG encoder to write 4-channel RGBA (not rgb24 which drops alpha)
+    const rgbaFilter = filterParts.join(";") + ";[out]format=rgba[out_rgba]";
     await execFileAsync("ffmpeg", [
       "-y", ...bgInput, ...layerInputs,
-      "-filter_complex", filterParts.join(";"),
-      "-map", "[out]", "-f", "image2",
+      "-filter_complex", rgbaFilter,
+      "-map", "[out_rgba]", "-f", "image2", "-pix_fmt", "rgba",
       "-t", String(duration),
       join(compositeDir, "frame_%06d.png"),
     ]);
