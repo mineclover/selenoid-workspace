@@ -31,13 +31,16 @@ export function buildViewerHtml(opts: {
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 
-const params   = new URLSearchParams(location.search);
-const charUrl  = params.get('char');
-const animUrl  = params.get('anim');
-const fbxUrl   = params.get('fbx');
-const openpose = params.get('mode') === 'openpose';
-const bgHex    = openpose ? '#000000' : (params.get('bg') || ${JSON.stringify(bgColor)});
-const camView  = params.get('view') || (openpose ? 'front' : ${JSON.stringify(view)});
+const params    = new URLSearchParams(location.search);
+const charUrl   = params.get('char');
+const animUrl   = params.get('anim');
+const fbxUrl    = params.get('fbx');
+const openpose  = params.get('mode') === 'openpose';
+const bgHex     = openpose ? '#000000' : (params.get('bg') || ${JSON.stringify(bgColor)});
+const camView   = params.get('view') || (openpose ? 'front' : ${JSON.stringify(view)});
+// 'global': fixed camera across all frames (shows root motion)
+// 'frame':  per-frame normalization (character always fills canvas)
+const normalize = params.get('normalize') || 'global';
 
 const log = m => { console.log(m); document.getElementById('status').textContent = m; };
 
@@ -212,11 +215,57 @@ function buildBoneMap(root) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Keypoint computation — normalised to canvas, no camera dependency
-// Removes root motion: character always centred and fills the canvas.
+// Global normalisation — samples the full animation to build a fixed toScreen.
+// Must be called after FBX + mixer are ready. Resets mixer to t=0 when done.
+// ═══════════════════════════════════════════════════════════════════════════════
+function computeGlobalNorm() {
+  if (!mixer || animDuration <= 0) return;
+  const N = 40;
+  let gMinX = Infinity, gMaxX = -Infinity, gMinY = Infinity, gMaxY = -Infinity;
+
+  for (let i = 0; i < N; i++) {
+    const t = (i / (N - 1)) * animDuration;
+    mixer.setTime(t);
+    if (rootObj) rootObj.updateMatrixWorld(true);
+    for (const bn of BBOX_BONES) {
+      const bone = boneMap[bn];
+      if (!bone) continue;
+      const p = new THREE.Vector3();
+      bone.getWorldPosition(p);
+      if (!isFinite(p.x) || !isFinite(p.y)) continue;
+      if (p.x < gMinX) gMinX = p.x; if (p.x > gMaxX) gMaxX = p.x;
+      if (p.y < gMinY) gMinY = p.y; if (p.y > gMaxY) gMaxY = p.y;
+    }
+  }
+
+  // Reset to t=0 after sampling
+  mixer.setTime(0);
+  if (rootObj) rootObj.updateMatrixWorld(true);
+
+  if (!isFinite(gMinX)) return; // no valid bones — fall back to per-frame
+
+  const bboxW = Math.max(gMaxX - gMinX, 1);
+  const bboxH = Math.max(gMaxY - gMinY, 1);
+  const bboxCX = (gMinX + gMaxX) / 2;
+  const bboxCY = (gMinY + gMaxY) / 2;
+  const PAD = 0.10;
+  const availW = W * (1 - 2 * PAD);
+  const availH = H * (1 - 2 * PAD);
+  const scale = Math.min(availW / bboxW, availH / bboxH);
+
+  globalToScreen = (wp) => ({
+    x: W / 2 - (wp.x - bboxCX) * scale,
+    y: H / 2 - (wp.y - bboxCY) * scale,
+  });
+  log('global norm · h=' + bboxH.toFixed(0) + ' scale=' + scale.toFixed(2));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Keypoint computation — world-space bones → canvas pixels.
+// Uses globalToScreen (fixed camera) when normalize=global, else per-frame bbox.
 // ═══════════════════════════════════════════════════════════════════════════════
 function computeKeypoints() {
-  // 1. Collect bbox reference bone positions
+  // 1. Collect bbox reference bone positions (always needed for per-frame fallback)
   const refPts = [];
   for (const bn of BBOX_BONES) {
     const bone = boneMap[bn];
@@ -227,29 +276,30 @@ function computeKeypoints() {
   }
   if (refPts.length === 0) return new Array(25).fill(null);
 
-  // 2. Bounding box from reference bones (front view: X=width, Y=height)
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const p of refPts) {
-    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
-    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+  // 2. Pick toScreen: global (fixed) or per-frame (always-fill)
+  let toScreen;
+  if (globalToScreen) {
+    toScreen = globalToScreen;
+  } else {
+    // Per-frame bbox
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of refPts) {
+      if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+    }
+    const bboxW = Math.max(maxX - minX, 1);
+    const bboxH = Math.max(maxY - minY, 1);
+    const bboxCX = (minX + maxX) / 2;
+    const bboxCY = (minY + maxY) / 2;
+    const PAD = 0.10;
+    const availW = W * (1 - 2 * PAD);
+    const availH = H * (1 - 2 * PAD);
+    const scale = Math.min(availW / bboxW, availH / bboxH);
+    toScreen = (wp) => ({
+      x: W / 2 - (wp.x - bboxCX) * scale,
+      y: H / 2 - (wp.y - bboxCY) * scale,
+    });
   }
-  const bboxW = Math.max(maxX - minX, 1);
-  const bboxH = Math.max(maxY - minY, 1);
-  const bboxCX = (minX + maxX) / 2;
-  const bboxCY = (minY + maxY) / 2;
-
-  // 3. Uniform scale: fit inside canvas with padding
-  const PAD = 0.10;
-  const availW = W * (1 - 2*PAD);
-  const availH = H * (1 - 2*PAD);
-  const scale = Math.min(availW / bboxW, availH / bboxH);
-
-  // 4. World → canvas pixel
-  // Front view: character's +X is on screen's left (mirror for natural pose)
-  const toScreen = (wp) => ({
-    x: W/2 - (wp.x - bboxCX) * scale,   // mirror X (character right = screen right)
-    y: H/2 - (wp.y - bboxCY) * scale,   // Y up = screen up
-  });
 
   // 5. Direct bone mappings
   const kps = new Array(25).fill(null);
@@ -404,21 +454,33 @@ function drawOpenPose() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 3D camera fit (for non-openpose preview)
+// 3D camera fit — samples all animation frames to cover full root-motion extent.
+// Resets mixer to t=0 when done.
 // ═══════════════════════════════════════════════════════════════════════════════
 function fitCamera3D(root) {
   const bbox = new THREE.Box3();
-  root.traverse(obj => {
-    if (!obj.isBone) return;
-    const p = new THREE.Vector3();
-    obj.getWorldPosition(p);
-    if (isFinite(p.x) && isFinite(p.y)) bbox.expandByPoint(p);
-  });
+  const N = 30;
+  for (let i = 0; i < N; i++) {
+    if (mixer && animDuration > 0) {
+      mixer.setTime((i / (N - 1)) * animDuration);
+      if (rootObj) rootObj.updateMatrixWorld(true);
+    }
+    root.traverse(obj => {
+      if (!obj.isBone) return;
+      const p = new THREE.Vector3();
+      obj.getWorldPosition(p);
+      if (isFinite(p.x) && isFinite(p.y)) bbox.expandByPoint(p);
+    });
+  }
+  if (mixer) { mixer.setTime(0); if (rootObj) rootObj.updateMatrixWorld(true); }
+
   if (bbox.isEmpty()) { camera.position.set(0,100,1500); camera.lookAt(0,100,0); return; }
 
   const center = bbox.getCenter(new THREE.Vector3());
   const size   = bbox.getSize(new THREE.Vector3());
-  const padH   = size.y * 1.2;
+  const screenH = size.y * 1.2;
+  const screenW = (camView === 'side' ? size.z : size.x) * 1.25;
+  const padH    = Math.max(screenH, screenW / aspect);
   camera.top = padH/2; camera.bottom = -padH/2;
   camera.left = -(padH*aspect)/2; camera.right = (padH*aspect)/2;
 
@@ -426,13 +488,17 @@ function fitCamera3D(root) {
   else                    camera.position.set(center.x, center.y, center.z+1500);
   camera.lookAt(center);
   camera.updateProjectionMatrix();
-  log('3D camera fitted');
+  log('3D camera fitted · h=' + padH.toFixed(0));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Animation state
 // ═══════════════════════════════════════════════════════════════════════════════
 let mixer = null, animDuration = 0, rootObj = null;
+
+// Fixed toScreen computed once across all animation frames (global normalization).
+// null until computeGlobalNorm() runs, then stays fixed for the whole session.
+let globalToScreen = null;
 
 window.__hf = {
   duration: 0,
@@ -480,8 +546,13 @@ function onReady(root, clips) {
   window.__hf.duration = animDuration;
   window.__fbxReady    = true;
 
-  if (openpose) { drawOpenPose(); }
-  else { fitCamera3D(root); renderer.render(scene, camera); }
+  if (openpose) {
+    if (normalize !== 'frame') computeGlobalNorm(); // samples all frames, resets to t=0
+    drawOpenPose();
+  } else {
+    fitCamera3D(root); // samples all frames, resets to t=0
+    renderer.render(scene, camera);
+  }
 
   log('ready · ' + (openpose ? 'openpose BODY_25' : '3D') + ' · dur=' + animDuration.toFixed(2) + 's · bones=' + Object.keys(boneMap).length);
 }

@@ -171,6 +171,7 @@ program
   .option("--bg <color>", "Background color for chroma key", "#00FF00")
   .option("--frustum <n>", "Orthographic frustum height in model units (auto-fit if omitted)")
   .option("--openpose", "Render COCO-18 OpenPose stick figure instead of 3D view")
+  .option("--normalize <mode>", "OpenPose camera: global (fixed, shows root motion) | frame (always-fill)", "global")
   .option("--no-headless", "Show browser window (useful for debugging)")
   .option("-o, --output <dir>", "Output directory for frames")
   .option("--strip <path>", "Also assemble frames into a strip PNG")
@@ -179,7 +180,7 @@ program
     char?: string; anim?: string; fbx?: string;
     frames: string; fps?: string; frameWidth: string; frameHeight: string;
     view: string; bg: string; frustum?: string;
-    openpose?: boolean; headless: boolean; output?: string; strip?: string; video?: string;
+    openpose?: boolean; normalize: string; headless: boolean; output?: string; strip?: string; video?: string;
   }) => {
     const charPath = resolve(opts.char ?? opts.fbx ?? "");
     const animPath = opts.anim ? resolve(opts.anim) : undefined;
@@ -230,6 +231,7 @@ program
       frustumHeight: opts.frustum ? parseFloat(opts.frustum) : undefined,
       headless:      opts.headless,
       mode,
+      normalize:     opts.normalize as "global" | "frame",
       videoPath,
     });
 

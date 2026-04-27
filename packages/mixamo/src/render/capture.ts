@@ -16,8 +16,9 @@ export interface FbxCaptureOptions {
   bgColor?: string;
   frustumHeight?: number;
   headless?: boolean;
-  mode?: "3d" | "openpose";   // openpose: render COCO-18 stick figure
-  videoPath?: string;         // if set, assemble frames into MP4 with ffmpeg
+  mode?: "3d" | "openpose";        // openpose: render COCO-18 stick figure
+  normalize?: "global" | "frame"; // OpenPose: global=fixed camera, frame=always-fill (default: global)
+  videoPath?: string;              // if set, assemble frames into MP4 with ffmpeg
 }
 
 export interface FbxCaptureResult {
@@ -64,6 +65,7 @@ export async function captureFbx(opts: FbxCaptureOptions): Promise<FbxCaptureRes
     frustumHeight,
     headless    = true,
     mode        = "3d",
+    normalize   = "global",
     videoPath,
   } = opts;
 
@@ -71,7 +73,9 @@ export async function captureFbx(opts: FbxCaptureOptions): Promise<FbxCaptureRes
 
   const renderServer = await startRenderServer({ bgColor, view, frustumHeight });
   const baseUrl = renderServer.viewerUrl(charPath, { charPath, animPath, view, bg: bgColor });
-  const pageUrl = mode === "openpose" ? baseUrl + "&mode=openpose" : baseUrl;
+  const pageUrl = baseUrl
+    + (mode === "openpose" ? "&mode=openpose" : "")
+    + (normalize === "frame" ? "&normalize=frame" : "");
 
   console.log(`[render] char: ${charPath}`);
   if (animPath) console.log(`[render] anim: ${animPath}`);
