@@ -163,7 +163,8 @@ program
   .option("--char <path>", "Character FBX path (mesh + skeleton)")
   .option("--anim <path>", "Animation FBX path (retargeted onto --char)")
   .option("--fbx <path>",  "Single FBX with both character and animation")
-  .option("--frames <n>",       "Number of frames to capture", "8")
+  .option("--frames <n>",       "Number of frames to capture (ignored when --fps is set)", "8")
+  .option("--fps <n>",          "Capture at this frame rate; total frames = ceil(duration × fps)")
   .option("--frame-width <n>",  "Output frame width px",  "512")
   .option("--frame-height <n>", "Output frame height px", "1024")
   .option("--view <v>", "Camera view: side | front | back (openpose default: front)")
@@ -173,11 +174,12 @@ program
   .option("--no-headless", "Show browser window (useful for debugging)")
   .option("-o, --output <dir>", "Output directory for frames")
   .option("--strip <path>", "Also assemble frames into a strip PNG")
+  .option("--video <path>", "Assemble captured frames into an MP4 (requires ffmpeg)")
   .action(async (opts: {
     char?: string; anim?: string; fbx?: string;
-    frames: string; frameWidth: string; frameHeight: string;
+    frames: string; fps?: string; frameWidth: string; frameHeight: string;
     view: string; bg: string; frustum?: string;
-    openpose?: boolean; headless: boolean; output?: string; strip?: string;
+    openpose?: boolean; headless: boolean; output?: string; strip?: string; video?: string;
   }) => {
     const charPath = resolve(opts.char ?? opts.fbx ?? "");
     const animPath = opts.anim ? resolve(opts.anim) : undefined;
@@ -195,35 +197,46 @@ program
       process.exit(1);
     }
 
-    const frameCount  = parseInt(opts.frames, 10);
+    const fps        = opts.fps ? parseFloat(opts.fps) : undefined;
+    const frameCount = parseInt(opts.frames, 10);
     const frameWidth  = parseInt(opts.frameWidth, 10);
     const frameHeight = parseInt(opts.frameHeight, 10);
     const outDir = resolve(opts.output ?? join(charPath, "..", "frames"));
 
     console.log(`Char:   ${charPath}`);
     if (animPath) console.log(`Anim:   ${animPath}`);
-    console.log(`Frames: ${frameCount} · ${frameWidth}×${frameHeight} · view=${opts.view}`);
+    if (fps) {
+      console.log(`FPS:    ${fps} · ${frameWidth}×${frameHeight} · view=${opts.view}`);
+    } else {
+      console.log(`Frames: ${frameCount} · ${frameWidth}×${frameHeight} · view=${opts.view}`);
+    }
 
     const mode = opts.openpose ? "openpose" : "3d";
-    // front view separates left/right arms in OpenPose; side is default for 3d
     const view = (opts.view ?? (opts.openpose ? "front" : "side")) as "side" | "front" | "back";
     console.log(`Mode:   ${mode}`);
+
+    const videoPath = opts.video ? resolve(opts.video) : undefined;
 
     const result = await captureFbx({
       charPath,
       animPath,
-      outputDir:    outDir,
-      frames:       frameCount,
+      outputDir:     outDir,
+      frames:        fps ? undefined : frameCount,
+      fps,
       frameWidth,
       frameHeight,
       view,
-      bgColor:      opts.openpose ? "#000000" : opts.bg,
+      bgColor:       opts.openpose ? "#000000" : opts.bg,
       frustumHeight: opts.frustum ? parseFloat(opts.frustum) : undefined,
-      headless:     opts.headless,
+      headless:      opts.headless,
       mode,
+      videoPath,
     });
 
     console.log(`\nFrames: ${result.framePaths.length} → ${outDir}`);
+    if (result.videoPath) {
+      console.log(`Video:  ${result.videoPath}`);
+    }
 
     if (opts.strip) {
       const stripPath = resolve(opts.strip);
