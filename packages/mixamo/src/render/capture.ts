@@ -18,6 +18,8 @@ export interface FbxCaptureOptions {
   headless?: boolean;
   mode?: "3d" | "openpose";        // openpose: render COCO-18 stick figure
   normalize?: "global" | "frame"; // OpenPose: global=fixed camera, frame=always-fill (default: global)
+  engine?: "three" | "blender";   // three: Three.js+Puppeteer (default), blender: headless Blender
+  blenderPath?: string;            // custom Blender binary path (auto-detected if omitted)
   saveJson?: boolean;              // save OpenPose JSON keypoints alongside each PNG (openpose mode only)
   videoPath?: string;              // if set, assemble frames into MP4 with ffmpeg
 }
@@ -84,6 +86,18 @@ async function captureFrame(
 }
 
 export async function captureFbx(opts: FbxCaptureOptions): Promise<FbxCaptureResult> {
+  // Route to Blender backend when requested
+  if (opts.engine === "blender") {
+    const { captureWithBlender } = await import("./blender.js");
+    const result = await captureWithBlender(opts);
+    if (opts.videoPath && result.framePaths.length > 0) {
+      result.videoPath = assembleVideo(
+        result.framePaths, opts.videoPath, opts.fps ?? 30, result.frameWidth, result.frameHeight,
+      );
+    }
+    return result;
+  }
+
   const {
     charPath, animPath, outputDir,
     frameWidth  = 512,
