@@ -36,17 +36,16 @@
 
 ### 🟡 Medium
 
-- [ ] **split FBX (--char + --anim) 실테스트**
-  Mixamo에서 캐릭터 FBX + 별도 애니메이션 FBX 다운로드 후 테스트.
-  `--char character.fbx --anim walking.fbx` 워크플로우 검증.
+- [x] **split FBX (--char + --anim) 실테스트**
+  Sword and Shield Pack으로 검증. walk/slash/run/jump/idle/block 6종 전부 정상.
+  X Bot.fbx(v6100) 에러 → 즉시 실패(pageerror race) + README 워크어라운드 문서화.
 
 - [ ] **ComfyUI generate 연동 테스트**
   ComfyUI 실행 환경에서 `generate --comfyui http://127.0.0.1:8188` 실제 제출 검증.
   워크플로우 JSON이 ComfyUI에서 정상 임포트되는지 확인.
 
-- [ ] **다양한 모션 OpenPose 품질 검증**
-  Walking, Running, Idle 등 다른 애니메이션으로 OpenPose 출력 품질 확인.
-  측면 뷰(`--view side`) OpenPose 렌더 검증.
+- [x] **다양한 모션 OpenPose 품질 검증**
+  6종 모션 검증 완료. 색상·본 매핑·글로벌 노멀라이제이션 전부 정상.
 
 ### 🟢 Low
 
