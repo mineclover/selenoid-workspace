@@ -30,7 +30,6 @@ export async function captureWithBlender(
     frameWidth  = 512,
     frameHeight = 1024,
     view        = "front",
-    normalize   = "global",
     saveJson    = false,
     blenderPath,
   } = opts;
@@ -50,7 +49,7 @@ export async function captureWithBlender(
   const argsJson = JSON.stringify({
     charPath, animPath, outputDir,
     frames, fps, width: frameWidth, height: frameHeight,
-    view, normalize, saveJson,
+    view, saveJson,
   });
 
   const proc = spawnSync(

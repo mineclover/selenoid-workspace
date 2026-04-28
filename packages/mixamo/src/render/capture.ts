@@ -17,7 +17,6 @@ export interface FbxCaptureOptions {
   frustumHeight?: number;
   headless?: boolean;
   mode?: "3d" | "openpose";        // openpose: render COCO-18 stick figure
-  normalize?: "global" | "frame"; // OpenPose: global=fixed camera, frame=always-fill (default: global)
   engine?: "three" | "blender";   // three: Three.js+Puppeteer (default), blender: headless Blender
   blenderPath?: string;            // custom Blender binary path (auto-detected if omitted)
   saveJson?: boolean;              // save OpenPose JSON keypoints alongside each PNG (openpose mode only)
@@ -107,7 +106,6 @@ export async function captureFbx(opts: FbxCaptureOptions): Promise<FbxCaptureRes
     frustumHeight,
     headless    = true,
     mode        = "3d",
-    normalize   = "global",
     saveJson    = false,
     videoPath,
   } = opts;
@@ -117,8 +115,7 @@ export async function captureFbx(opts: FbxCaptureOptions): Promise<FbxCaptureRes
   const renderServer = await startRenderServer({ bgColor, view, frustumHeight });
   const baseUrl = renderServer.viewerUrl(charPath, { charPath, animPath, view, bg: bgColor });
   const pageUrl = baseUrl
-    + (mode === "openpose" ? "&mode=openpose" : "")
-    + (normalize === "frame" ? "&normalize=frame" : "");
+    + (mode === "openpose" ? "&mode=openpose" : "");
 
   console.log(`[render] char: ${charPath}`);
   if (animPath) console.log(`[render] anim: ${animPath}`);

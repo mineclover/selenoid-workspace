@@ -38,9 +38,6 @@ const fbxUrl    = params.get('fbx');
 const openpose  = params.get('mode') === 'openpose';
 const bgHex     = openpose ? '#000000' : (params.get('bg') || ${JSON.stringify(bgColor)});
 const camView   = params.get('view') || (openpose ? 'front' : ${JSON.stringify(view)});
-// 'global': fixed camera across all frames (shows root motion)
-// 'frame':  per-frame normalization (character always fills canvas)
-const normalize = params.get('normalize') || 'global';
 
 const log = m => { console.log(m); document.getElementById('status').textContent = m; };
 
@@ -325,31 +322,7 @@ function computeKeypoints() {
   }
   if (refPts.length === 0) return new Array(25).fill(null);
 
-  // 2. Pick toScreen: global (fixed) or per-frame (always-fill)
-  let toScreen;
-  if (globalToScreen) {
-    toScreen = globalToScreen;
-  } else {
-    // Per-frame bbox — track X, Z, Y to support all view directions
-    let minX = Infinity, maxX = -Infinity;
-    let minZ = Infinity, maxZ = -Infinity;
-    let minY = Infinity, maxY = -Infinity;
-    for (const p of refPts) {
-      if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
-      if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
-      if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
-    }
-    const bboxCX = (minX + maxX) / 2;
-    const bboxCY = (minY + maxY) / 2;
-    const bboxCZ = (minZ + maxZ) / 2;
-    const bboxHoriz = camView === 'side' ? Math.max(maxZ - minZ, 1) : Math.max(maxX - minX, 1);
-    const bboxH     = Math.max(maxY - minY, 1);
-    const PAD = 0.10;
-    const availW = W * (1 - 2 * PAD);
-    const availH = H * (1 - 2 * PAD);
-    const scale = Math.min(availW / bboxHoriz, availH / bboxH);
-    toScreen = makeToScreen(bboxCX, bboxCY, bboxCZ, scale);
-  }
+  const toScreen = globalToScreen ?? makeToScreen(0, 0, 0, 100);
 
   // 5. Direct bone mappings
   const kps = new Array(25).fill(null);
@@ -628,7 +601,7 @@ function onReady(root, clips) {
   window.__fbxReady    = true;
 
   if (openpose) {
-    if (normalize !== 'frame') computeGlobalNorm(); // samples all frames, resets to t=0
+    computeGlobalNorm(); // samples all frames, resets to t=0
     drawOpenPose();
   } else {
     fitCamera3D(root); // samples all frames, resets to t=0

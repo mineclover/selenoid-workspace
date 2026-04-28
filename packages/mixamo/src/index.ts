@@ -172,7 +172,6 @@ program
   .option("--bg <color>", "Background color for chroma key", "#00FF00")
   .option("--frustum <n>", "Orthographic frustum height in model units (auto-fit if omitted)")
   .option("--openpose", "Render COCO-18 OpenPose stick figure instead of 3D view")
-  .option("--normalize <mode>", "OpenPose camera: global (fixed, shows root motion) | frame (always-fill)", "global")
   .option("--engine <e>", "Render engine: three (Three.js+Puppeteer, default) | blender (headless Blender)", "three")
   .option("--blender <path>", "Path to Blender binary (auto-detected if omitted)")
   .option("--json", "Save OpenPose JSON keypoints alongside each PNG (openpose mode only)")
@@ -184,7 +183,7 @@ program
     char?: string; anim?: string; fbx?: string;
     frames: string; fps?: string; frameWidth: string; frameHeight: string;
     view: string; bg: string; frustum?: string;
-    openpose?: boolean; normalize: string; engine: string; blender?: string; json?: boolean;
+    openpose?: boolean; engine: string; blender?: string; json?: boolean;
     headless: boolean; output?: string; strip?: string; video?: string;
   }) => {
     const charPath = resolve(opts.char ?? opts.fbx ?? "");
@@ -238,7 +237,6 @@ program
         frustumHeight: opts.frustum ? parseFloat(opts.frustum) : undefined,
         headless:      opts.headless,
         mode,
-        normalize:     opts.normalize as "global" | "frame",
         engine:        opts.engine as "three" | "blender",
         blenderPath:   opts.blender,
         saveJson:      opts.json ?? false,
