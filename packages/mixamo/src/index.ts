@@ -221,23 +221,34 @@ program
 
     const videoPath = opts.video ? resolve(opts.video) : undefined;
 
-    const result = await captureFbx({
-      charPath,
-      animPath,
-      outputDir:     outDir,
-      frames:        fps ? undefined : frameCount,
-      fps,
-      frameWidth,
-      frameHeight,
-      view,
-      bgColor:       opts.openpose ? "#000000" : opts.bg,
-      frustumHeight: opts.frustum ? parseFloat(opts.frustum) : undefined,
-      headless:      opts.headless,
-      mode,
-      normalize:     opts.normalize as "global" | "frame",
-      saveJson:      opts.json ?? false,
-      videoPath,
-    });
+    let result;
+    try {
+      result = await captureFbx({
+        charPath,
+        animPath,
+        outputDir:     outDir,
+        frames:        fps ? undefined : frameCount,
+        fps,
+        frameWidth,
+        frameHeight,
+        view,
+        bgColor:       opts.openpose ? "#000000" : opts.bg,
+        frustumHeight: opts.frustum ? parseFloat(opts.frustum) : undefined,
+        headless:      opts.headless,
+        mode,
+        normalize:     opts.normalize as "global" | "frame",
+        saveJson:      opts.json ?? false,
+        videoPath,
+      });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`\n[render error] ${msg}`);
+      if (msg.includes("6100") || msg.includes("version not supported")) {
+        console.error("  → FBX must be binary v7.x. Use a Mixamo 'With Skin' FBX as --char.");
+        console.error(`  → Workaround: --char "Jumping Down.fbx" --anim "${animPath ?? charPath}"`);
+      }
+      process.exit(1);
+    }
 
     console.log(`\nFrames: ${result.framePaths.length} → ${outDir}`);
     if (result.jsonPaths.length > 0) {
