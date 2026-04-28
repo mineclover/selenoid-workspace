@@ -58,6 +58,12 @@ mixamo-sprite render [options]
 | `--char <path>` | Character FBX (mesh + skeleton); pair with `--anim` |
 | `--anim <path>` | Separate animation FBX retargeted onto `--char` |
 
+> **FBX version requirement**: Three.js FBXLoader requires **binary FBX 7.x** (≥7000).
+> Mixamo "Download with Skin" exports are v7700 and work directly.
+> Mixamo character-only exports (e.g. `X Bot.fbx`) may be v6100 (unsupported).
+> **Workaround**: use a "With Skin" FBX as `--char` and pair it with animation-only FBX files via `--anim`.
+> Example: `--char "Jumping Down.fbx" --anim "sword and shield walk.fbx"`
+
 **Frame sampling**
 
 | Flag | Default | Description |

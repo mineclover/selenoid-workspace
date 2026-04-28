@@ -31,9 +31,15 @@ export interface FbxCaptureResult {
   videoPath?: string;
 }
 
-// Poll until window.__fbxReady or __fbxError is set
+// Poll until window.__fbxReady or __fbxError is set.
+// Also races against pageerror events so FBX version mismatches fail fast
+// instead of waiting the full timeout.
 async function waitForFbx(page: Page, timeoutMs = 30_000): Promise<number> {
-  const result = await page.waitForFunction(
+  const pageErrorPromise = new Promise<never>((_, reject) => {
+    page.once("pageerror", err => reject(new Error(`FBX load failed: ${err.message}`)));
+  });
+
+  const readyPromise = page.waitForFunction(
     () => {
       const w = window as unknown as { __fbxReady?: boolean; __fbxError?: string };
       if (w.__fbxError) throw new Error(w.__fbxError);
@@ -41,7 +47,9 @@ async function waitForFbx(page: Page, timeoutMs = 30_000): Promise<number> {
     },
     { timeout: timeoutMs, polling: 200 }
   );
-  return (await result.jsonValue()) as number;
+
+  const handle = await Promise.race([readyPromise, pageErrorPromise]);
+  return (await handle.jsonValue()) as number;
 }
 
 interface HfKeypoints {

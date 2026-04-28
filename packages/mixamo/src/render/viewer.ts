@@ -44,6 +44,18 @@ const normalize = params.get('normalize') || 'global';
 
 const log = m => { console.log(m); document.getElementById('status').textContent = m; };
 
+// Intercept console.error so that THREE.FBXLoader version failures (which do not
+// invoke the loader's onError callback) are captured as __fbxError immediately,
+// rather than causing waitForFbx() to time out after 30s.
+const _origError = console.error.bind(console);
+console.error = (...args) => {
+  _origError(...args);
+  const msg = args.map(String).join(' ');
+  if (!window.__fbxReady && !window.__fbxError && msg.includes('THREE.FBXLoader')) {
+    window.__fbxError = msg;
+  }
+};
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // OpenPose BODY_25 spec
 // Keypoint indices & colors: https://github.com/CMU-Perceptual-Computing-Lab/openpose/blob/master/include/openpose/pose/poseParametersRender.hpp
