@@ -24,11 +24,11 @@
 
 ### 🟢 Low
 
-- [ ] **keyboard shortcut 확장**
-  `mapKey`에 F1–F12 전체, NumLock, CapsLock, PrintScreen 추가.
+- [x] **keyboard shortcut 확장**
+  F1–F12 전체, Space, Insert 추가. NumLock/CapsLock/PrintScreen은 W3C WebDriver 미지원.
 
-- [ ] **assert 타입 확장**
-  `assert count` (엘리먼트 개수), `assert attribute` (속성값) 추가 검토.
+- [x] **assert 타입 확장**
+  `assert count` (엘리먼트 개수), `assert attribute` (속성값) 추가. getAttribute/getElementCount 메서드 추가.
 
 ---
 
@@ -49,12 +49,11 @@
 
 ### 🟢 Low
 
-- [ ] **얼굴 키포인트 정확도 개선**
-  현재 Head bone 위치에서 neck-length 비율로 추정.
-  head bone 방향 벡터를 활용한 개선 검토.
+- [x] **얼굴 키포인트 정확도 개선**
+  head bone tail world-space 위치 + bone direction vector 사용. cm/m 단위 버그 수정.
 
-- [ ] **batch 렌더링 커맨드**
-  디렉토리 내 여러 FBX 파일을 일괄 렌더링하는 `batch` 커맨드.
+- [x] **batch 렌더링 커맨드**
+  `batch <dir>` — *.fbx 일괄 렌더링, `rendered/<stem>/frames/` 출력.
 
 ---
 
@@ -71,8 +70,8 @@
 - [x] **selenoid.go TODO 정리** (`line 59`)
   `localaddr()` 주석을 설명적으로 교체.
 
-- [ ] **브라우저 버전 추가**
-  Chrome 149+ 이미지 확인 및 `browsers.json` 업데이트.
+- [x] **브라우저 버전 추가**
+  selenoid/chrome 최신 이미지가 128.0 — 이미 default로 설정됨. 추가할 버전 없음.
 
 ---
 
@@ -84,8 +83,8 @@
   실제 캐릭터로 전체 파이프라인 1회 검증:
   `render --openpose` → `generate --workflow-out` → ComfyUI 임포트 → `strip`
 
-- [ ] **생성 이미지 후처리 자동화**
-  ComfyUI 출력 → `remove-bg` → `strip` → `layers.json` 생성 자동화 스크립트.
+- [x] **생성 이미지 후처리 자동화**
+  `process <frames-dir>` 커맨드 추가 — remove-bg → strip → layers.json 자동화.
 
 ### 🟢 Low
 
