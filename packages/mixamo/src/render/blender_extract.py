@@ -205,18 +205,35 @@ def compute_keypoints(arm_obj, to_screen):
         wp['mixamorig:Head'] = head_pos
 
     if head_pos and neck_pos:
-        hx, hy, hz = head_pos
-        nx, ny, nz = neck_pos
-        hl = math.sqrt((hx-nx)**2 + (hy-ny)**2 + (hz-nz)**2)
+        from mathutils import Vector
+        head_bone = arm_obj.pose.bones.get('mixamorig:Head')
+        if head_bone:
+            head_mat_world = arm_obj.matrix_world @ head_bone.matrix
+            # Bone root (world) = head_pos; bone tail transformed to world space
+            base          = Vector(head_pos)
+            tail_world    = arm_obj.matrix_world @ Vector(head_bone.tail)
+            bone_dir      = (tail_world - base).normalized()   # neck-top → skull-top (world)
+            bone_len_w    = (tail_world - base).length         # world-space bone length (metres)
+            bone_x        = Vector(head_mat_world.col[0].xyz).normalized()  # lateral (char LEFT=+X)
 
-        # Nose: below head origin (lower Z)
-        kps[0]  = to_screen((hx, hy, hz - hl*0.28))
-        # Eyes: lateral offset in X
-        # In Blender: char anatomical RIGHT = -X → REye at -X
-        kps[15] = to_screen((hx - hl*0.18, hy, hz - hl*0.18))  # REye
-        kps[16] = to_screen((hx + hl*0.18, hy, hz - hl*0.18))  # LEye
-        kps[17] = to_screen((hx - hl*0.34, hy, hz - hl*0.22))  # REar
-        kps[18] = to_screen((hx + hl*0.34, hy, hz - hl*0.22))  # LEar
+            # Face midpoint ~30% along bone from base (= upper face / nose level)
+            face_mid = base + bone_dir * (bone_len_w * 0.30)
+            eye_lat  = bone_len_w * 0.15
+            # REye: char anatomical RIGHT = -X in Blender
+            kps[0]  = to_screen(tuple(face_mid))
+            kps[15] = to_screen(tuple(face_mid - bone_x * eye_lat + bone_dir * (bone_len_w * 0.12)))
+            kps[16] = to_screen(tuple(face_mid + bone_x * eye_lat + bone_dir * (bone_len_w * 0.12)))
+            kps[17] = to_screen(tuple(face_mid - bone_x * (eye_lat * 2.2) + bone_dir * (bone_len_w * 0.06)))
+            kps[18] = to_screen(tuple(face_mid + bone_x * (eye_lat * 2.2) + bone_dir * (bone_len_w * 0.06)))
+        else:
+            hx, hy, hz = head_pos
+            nx, ny, nz = neck_pos
+            hl = math.sqrt((hx-nx)**2 + (hy-ny)**2 + (hz-nz)**2)
+            kps[0]  = to_screen((hx, hy, hz + hl*0.28))
+            kps[15] = to_screen((hx - hl*0.18, hy, hz + hl*0.18))
+            kps[16] = to_screen((hx + hl*0.18, hy, hz + hl*0.18))
+            kps[17] = to_screen((hx - hl*0.34, hy, hz + hl*0.22))
+            kps[18] = to_screen((hx + hl*0.34, hy, hz + hl*0.22))
 
     def foot_extras(toe_key, foot_key, x_sign, kp_small, kp_heel):
         if wp.get(toe_key) and wp.get(foot_key):

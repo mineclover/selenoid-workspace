@@ -277,6 +277,161 @@ program
     }
   });
 
+// ─── batch ────────────────────────────────────────────────────────────────────
+program
+  .command("batch")
+  .description("Render all FBX files in a directory as separate frame sequences")
+  .argument("<dir>", "Directory containing *.fbx files")
+  .option("--fps <n>",          "Capture frame rate; total frames = ceil(duration × fps)")
+  .option("--frames <n>",       "Number of frames per FBX (ignored when --fps is set)", "8")
+  .option("--frame-width <n>",  "Output frame width px",  "512")
+  .option("--frame-height <n>", "Output frame height px", "1024")
+  .option("--view <v>",         "Camera view: side | front | back")
+  .option("--openpose",         "Render COCO-18 OpenPose stick figure instead of 3D view")
+  .option("--engine <e>",       "Render engine: three | blender", "three")
+  .option("--blender <path>",   "Path to Blender binary (auto-detected if omitted)")
+  .option("--json",             "Save OpenPose JSON keypoints (openpose mode only)")
+  .option("--video",            "Assemble each FBX's frames into an MP4")
+  .option("-o, --output <dir>", "Root output directory (default: <dir>/rendered)")
+  .action(async (dir: string, opts: {
+    fps?: string; frames: string; frameWidth: string; frameHeight: string;
+    view?: string; openpose?: boolean; engine: string; blender?: string;
+    json?: boolean; video?: boolean; output?: string;
+  }) => {
+    const { readdirSync } = await import("node:fs");
+    const { basename } = await import("node:path");
+
+    const srcDir    = resolve(dir);
+    const outRoot   = resolve(opts.output ?? join(srcDir, "rendered"));
+    const fbxFiles  = readdirSync(srcDir).filter(f => f.toLowerCase().endsWith(".fbx"));
+
+    if (fbxFiles.length === 0) {
+      console.error(`No .fbx files found in ${srcDir}`);
+      process.exit(1);
+    }
+
+    const fps        = opts.fps ? parseFloat(opts.fps) : undefined;
+    const frameCount = parseInt(opts.frames, 10);
+    const frameWidth  = parseInt(opts.frameWidth, 10);
+    const frameHeight = parseInt(opts.frameHeight, 10);
+    const mode        = opts.openpose ? "openpose" : "3d";
+    const view        = (opts.view ?? (opts.openpose ? "front" : "side")) as "side" | "front" | "back";
+
+    console.log(`Batch: ${fbxFiles.length} FBX files in ${srcDir}`);
+
+    let passed = 0;
+    let failed = 0;
+
+    for (const fbxFile of fbxFiles) {
+      const charPath = join(srcDir, fbxFile);
+      const stem     = basename(fbxFile, ".fbx");
+      const outDir   = join(outRoot, stem, "frames");
+      const videoPath = opts.video ? join(outRoot, stem, `${stem}.mp4`) : undefined;
+
+      console.log(`\n[${stem}]`);
+      try {
+        const result = await captureFbx({
+          charPath,
+          outputDir:   outDir,
+          frames:      fps ? undefined : frameCount,
+          fps,
+          frameWidth,
+          frameHeight,
+          view,
+          bgColor:     opts.openpose ? "#000000" : "#00FF00",
+          mode,
+          engine:      opts.engine as "three" | "blender",
+          blenderPath: opts.blender,
+          saveJson:    opts.json ?? false,
+          videoPath,
+        });
+        console.log(`  → ${result.framePaths.length} frames → ${outDir}`);
+        if (result.videoPath) console.log(`  → video: ${result.videoPath}`);
+        passed++;
+      } catch (e: unknown) {
+        console.error(`  [error] ${e instanceof Error ? e.message : String(e)}`);
+        failed++;
+      }
+    }
+
+    console.log(`\nBatch done: ${passed} passed, ${failed} failed`);
+  });
+
+// ─── process ──────────────────────────────────────────────────────────────────
+program
+  .command("process")
+  .description("Remove background, assemble strip, and write layers.json from a frames directory")
+  .argument("<frames-dir>", "Directory containing frame_N.png files")
+  .option("--bg-color <color>", "Background color to remove", "#000000")
+  .option("--fuzz <n>",         "Background removal fuzz %", "12")
+  .option("--frame-width <n>",  "Frame width px (read from first frame if omitted)")
+  .option("--frame-height <n>", "Frame height px (read from first frame if omitted)")
+  .option("--strip <path>",     "Output strip PNG (default: <frames-dir>/../strip.png)")
+  .option("--layers <path>",    "Output layers.json path (default: <frames-dir>/../layers.json)")
+  .option("--name <name>",      "Layer name in layers.json", "char")
+  .option("--no-loop",          "Set loop:false in layers.json")
+  .action(async (framesDir: string, opts: {
+    bgColor: string; fuzz: string;
+    frameWidth?: string; frameHeight?: string;
+    strip?: string; layers?: string; name: string; loop: boolean;
+  }) => {
+    const { default: sharp } = await import("sharp");
+    const { writeFileSync } = await import("node:fs");
+
+    const srcDir    = resolve(framesDir);
+    const framePaths = loadFramePaths(srcDir);
+
+    if (framePaths.length === 0) {
+      console.error(`No frame_N.png files found in ${srcDir}`);
+      process.exit(1);
+    }
+
+    // Infer dimensions from first frame if not provided
+    let fw = opts.frameWidth  ? parseInt(opts.frameWidth, 10)  : 0;
+    let fh = opts.frameHeight ? parseInt(opts.frameHeight, 10) : 0;
+    if (!fw || !fh) {
+      const meta = await sharp(framePaths[0]).metadata();
+      fw = fw || meta.width  || 512;
+      fh = fh || meta.height || 1024;
+    }
+
+    const stripPath  = resolve(opts.strip  ?? join(srcDir, "..", "strip.png"));
+    const layersPath = resolve(opts.layers ?? join(srcDir, "..", "layers.json"));
+    const fuzz       = parseInt(opts.fuzz, 10);
+
+    // Remove background from each frame into temp RGBA PNGs, then strip
+    const tmpDir = join(srcDir, ".rgba");
+    mkdirSync(tmpDir, { recursive: true });
+
+    console.log(`Removing background (${opts.bgColor}, fuzz=${fuzz}%) from ${framePaths.length} frames...`);
+    const rgbaPaths: string[] = [];
+    for (const fp of framePaths) {
+      const out = join(tmpDir, resolve(fp).replace(/\//g, "_").replace(/^_/, "") + ".rgba.png");
+      await removeBackground(fp, out, opts.bgColor, fuzz);
+      rgbaPaths.push(out);
+    }
+
+    console.log(`Assembling strip → ${stripPath}`);
+    await assembleStrip(rgbaPaths, stripPath);
+
+    const layersEntry = {
+      name:        opts.name,
+      file:        stripPath,
+      frameWidth:  fw,
+      frameHeight: fh,
+      rows:        1,
+      loop:        opts.loop,
+    };
+    writeFileSync(layersPath, JSON.stringify([layersEntry], null, 2));
+    console.log(`layers.json → ${layersPath}`);
+
+    // Clean up temp RGBA files
+    const { rmSync } = await import("node:fs");
+    rmSync(tmpDir, { recursive: true, force: true });
+
+    console.log(`\nDone: ${framePaths.length} frames → strip + layers.json`);
+  });
+
 // ─── generate ─────────────────────────────────────────────────────────────────
 program
   .command("generate")
